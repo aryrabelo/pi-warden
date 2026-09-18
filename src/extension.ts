@@ -302,7 +302,9 @@ export default function wardenExtension(pi: ExtensionAPI): void {
 
   // A partially updated module graph can hand this build a config without the sections it expects; see shape.ts.
   let shapeReported = false;
-  let backendReported = false;
+  // The unsupported backend we last warned about, so we do not repeat the notice every tool call — but a config that
+  // changes and breaks again warns afresh, so this is keyed on the value, not a once-per-session flag.
+  let backendWarned: string | undefined;
   const configFor = (ctx: ExtensionContext | ExtensionCommandContext): WardenConfig => {
     const { config, missing } = guardCurrentSections(completeConfig(loadConfig({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() })));
     if (missing.length && !shapeReported) {
@@ -311,8 +313,10 @@ export default function wardenExtension(pi: ExtensionAPI): void {
       const text = shapeWarning(missing, (configModule as { CONFIG_SCHEMA?: number }).CONFIG_SCHEMA);
       if (ctx.hasUI) ctx.ui.notify(text, "warning"); else pi.sendMessage({ customType: `${PACKAGE_NAME}-status`, content: text, display: true });
     }
-    if (!backendSupported(config.typesafeBackend, installedBackends()) && !backendReported) {
-      backendReported = true;
+    if (backendSupported(config.typesafeBackend, installedBackends())) {
+      backendWarned = undefined;
+    } else if (backendWarned !== config.typesafeBackend) {
+      backendWarned = config.typesafeBackend;
       const text = `pi-warden: this pi-typesafe does not implement the "${config.typesafeBackend}" backend, so judgments are off. Upgrade pi-typesafe or set "typesafeBackend" back to "typesafe" in ${userConfigPath()}. Offline pattern checks stay active.`;
       if (ctx.hasUI) ctx.ui.notify(text, "warning"); else pi.sendMessage({ customType: `${PACKAGE_NAME}-status`, content: text, display: true });
     }
@@ -452,6 +456,7 @@ export default function wardenExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     client = undefined;
+    backendWarned = undefined;
     budgetExhausted = false;
     stats = freshStats();
     widget.clear();
@@ -973,7 +978,7 @@ export default function wardenExtension(pi: ExtensionAPI): void {
           const usage = client?.getUsage();
           const guards = [config.action.enabled && "action", config.stuck.enabled && "stuck", config.done.enabled && "done-check", config.slop.enabled && "slop", config.slop.enabled && config.slop.prose.enabled && `prose (${config.slop.prose.audience})`, config.security.enabled && "security", config.rules.enabled && "rules", config.context.enabled && "context", config.runaway.enabled && "runaway", config.subagent.enabled && "subagent triage", config.notify.enabled && "desktop notifications"].filter(Boolean).join(", ");
           report([
-            `pi-warden: ${config.enabled ? `guarding ${config.action.tools.join(", ")} (${guards})` : "off"}; mode ${activeMode(config, ctx.hasUI)}; backend ${config.typesafeBackend} (${BACKENDS[config.typesafeBackend].host}); TypeSafe judgments ${source ? `consented via ${source}` : "not consented (run /warden enable)"}; ${auth.text}`,
+            `pi-warden: ${config.enabled ? `guarding ${config.action.tools.join(", ")} (${guards})` : "off"}; mode ${activeMode(config, ctx.hasUI)}; ${config.typesafeBackend === "typesafe" ? "" : `backend ${config.typesafeBackend} (${BACKENDS[config.typesafeBackend].host}); `}TypeSafe judgments ${source ? `consented via ${source}` : "not consented (run /warden enable)"}; ${auth.text}`,
             `Session: ${stats.inspected} inspected, ${stats.judged} judged, ${stats.warned} warned, ${stats.held} held, ${stats.approved} approved on retry, ${stats.offPlan} off plan, ${stats.offTask} off task, ${stats.slop} slop notes, ${stats.ruleViolations}/${stats.ruleChecks} rule violations, ${stats.pathNotes} sensitive-path notes, ${stats.stuck}/${stats.stuckChecks} stuck, ${stats.unverified}/${stats.doneChecks} unverified done, ${stats.proseNudges}/${stats.proseChecks} prose nudges, ${stats.runaway} runaway stops, ${stats.subagentWoken}/${stats.subagentReports} subagent reports woken, ${stats.restatements} restatements, ${stats.errors} TypeSafe errors; ${usage?.requestsStarted ?? 0}/${config.maxRequests} requests. Steers are ${config.steerVisible ? "shown in the transcript" : "hidden from the transcript (trace panel shows them)"}. Steer budget: ${config.steerBudget === 0 ? "off" : `${config.steerBudget} per run`}.`,
             formatSteers(stats),
             `Thresholds: irreversible warn ${config.action.irreversible.warn} / hold ${config.action.irreversible.confirm}; off-task warn ${config.action.offTask.warn} / steer ${config.action.offTask.steer} (never holds); intent mismatch ${config.action.intentMismatch} (${config.action.visibleMismatch} on a visible action); stuck same-strategy ${config.stuck.sameStrategy} after ${config.stuck.minFailures} failures; done claims ${config.done.claimsDone}; slop ${config.slop.threshold}, rules ${config.rules.threshold}, prose ${config.slop.prose.threshold} in ${config.slop.prose.trend}/3 replies; runaway ${config.runaway.repeats} repeats (thinking ${config.runaway.thinkingRepeats}), recover ${config.runaway.recover}; failOpen ${config.action.failOpen}.`,

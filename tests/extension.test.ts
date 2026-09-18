@@ -1577,6 +1577,19 @@ test("the backend option is forwarded only when it is not the default, and names
     "only the destination differs; the paragraph itself is one text, not two copies");
 });
 
+test("the status line adds a backend segment only for a non-default backend; the default line is unchanged", async () => {
+  await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true }));
+  await runCommand("status");
+  assert.ok(!/backend /.test(notices.at(-1)!.text), "a user who never set a backend sees the same status as before this option");
+
+  process.env.TYPESAFE_OPENROUTER_API_KEY = "offline-backend-key";
+  try {
+    await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true, typesafeBackend: "openrouter" }));
+    await runCommand("status");
+    assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "a redirected session is told so");
+  } finally { delete process.env.TYPESAFE_OPENROUTER_API_KEY; }
+});
+
 test("the credential that counts is the one the chosen backend uses, not the TypeSafe keystore", async () => {
   const { keyAvailable, backendSupported } = await import("../src/extension.js");
   assert.equal(keyAvailable("typesafe", {}, () => true), true);
@@ -1595,22 +1608,28 @@ test("the credential that counts is the one the chosen backend uses, not the Typ
 
 test("a backend this pi-typesafe cannot reach refuses to judge instead of quietly using the default destination", async () => {
   const savedBackendKey = process.env.TYPESAFE_OPENROUTER_API_KEY;
-  // The credential is present on purpose: the only thing standing between this config and a request is the support gate.
+  const savedKey = process.env.TYPESAFE_API_KEY;
+  // The exact motivating user: waitlisted for TypeSafe (no TypeSafe key at all), with an OpenRouter key of their own.
+  delete process.env.TYPESAFE_API_KEY;
   process.env.TYPESAFE_OPENROUTER_API_KEY = "offline-backend-key";
   await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true, typesafeBackend: "openrouter" }));
   try {
-    // Measured against pi-typesafe@0.5.0 from the registry: createTypeSafe({ backend: "openrouter" }) throws nothing and
-    // sends the request to api.typesafe.ai with the TypeSafe key. TYPESAFE_API_KEY is set for this suite, so without the
-    // gate this call would judge — against a destination the config did not choose, while consent named another one.
-    assert.equal(await toolCall("bash", { command: "npm test" }), undefined);
+    // Measured against pi-typesafe@0.5.0 from the registry: createTypeSafe({ backend: "openrouter" }) ignores the option
+    // and, with no TypeSafe key, THROWS "No TypeSafe API key". That throw is on the tool_call path, which has no try/catch,
+    // so it would tear down the hook — a destructive command that the offline pattern check would otherwise hold escapes
+    // instead. The support gate returns before createTypeSafe is ever built, so the call must simply not throw here.
+    const held = await toolCall("bash", { command: "rm -rf /var/data" });
     assert.equal(networkCalls, 0, "no request may leave for a destination the installed client cannot honour");
+    assert.ok(held?.block, "and the offline pattern check still guards the call — fail open, never crash the hook");
     assert.ok(notices.some(notice => /does not implement the "openrouter" backend, so judgments are off/.test(notice.text)),
-      "and the refusal is said out loud, once, with the way out");
+      "the refusal is said out loud, once, with the way out");
 
     await runCommand("status");
-    assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "status names the destination in force");
+    assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "status names the configured backend");
   } finally {
     if (savedBackendKey === undefined) delete process.env.TYPESAFE_OPENROUTER_API_KEY;
     else process.env.TYPESAFE_OPENROUTER_API_KEY = savedBackendKey;
+    if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY;
+    else process.env.TYPESAFE_API_KEY = savedKey;
   }
 });
