@@ -28,8 +28,8 @@ export { HoldLedger, HoldLog, holdLogPath, formatHolds, outcomeNote, regretsAt, 
 export type { CallOutcome, CallRecord, CallScores, HoldSnapshot, OutcomeVia } from "./holds.js";
 export type { ContextLedgerSnapshot, RecallKind } from "./saver.js";
 export type { ShapeResult } from "./shape.js";
-export { CONFIG_SCHEMA, defaultConfig, loadConfig, applyUserOverrides, applyProjectOverrides, isMode, isRecallTool, userConfigPath, projectConfigPath, readUserConfig, writeUserConfig, setUserSetting, PACKAGE_NAME } from "./config.js";
-export type { ActionGuardConfig, OffTaskThreshold, StuckGuardConfig, DoneGuardConfig, SlopGuardConfig, ProseConfig, SecurityConfig, RulesConfig, ContextConfig, RunawayConfig, NotifyConfig, SubagentConfig, RecallTool, Threshold, WardenConfig, WardenMode, LoadOptions } from "./config.js";
+export { CONFIG_SCHEMA, defaultConfig, loadConfig, applyUserOverrides, applyProjectOverrides, isMode, isJudgmentBackend, isRecallTool, userConfigPath, projectConfigPath, readUserConfig, writeUserConfig, setUserSetting, PACKAGE_NAME } from "./config.js";
+export type { ActionGuardConfig, OffTaskThreshold, StuckGuardConfig, DoneGuardConfig, SlopGuardConfig, ProseConfig, SecurityConfig, RulesConfig, ContextConfig, RunawayConfig, NotifyConfig, SubagentConfig, RecallTool, Threshold, WardenConfig, WardenMode, JudgmentBackend, LoadOptions } from "./config.js";
 export { commandOf, outputReportsFailure, COMMAND_TOOLS } from "./tools.js";
 export type { CommandView } from "./tools.js";
 export { renderTemplate, actionTokens, stuckTokens, doneTokens, proseTokens, runawayTokens, rulesTokens, defaultWidgetConfig, DEFAULT_TEMPLATES, TOKEN_NAMES } from "./widget.js";

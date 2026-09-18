@@ -2,13 +2,13 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { MouseRegion } from "@earendil-works/pi-tui";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { authState, createTypeSafe, describeAuth } from "pi-typesafe";
-import type { TypeSafe } from "pi-typesafe";
+import type { TypeSafe, TypeSafeOptions } from "pi-typesafe";
 import { ensureApiKey } from "pi-typesafe/ui";
 import { ActionGuard } from "./action-guard.js";
 import type { ToolCallRef } from "./action-guard.js";
 import * as configModule from "./config.js";
 import { applyUserOverrides, defaultConfig, isMode, loadConfig, PACKAGE_NAME, projectConfigPath, readUserConfig, setUserSetting, userConfigPath, writeUserConfig } from "./config.js";
-import type { WardenConfig, WardenMode } from "./config.js";
+import type { JudgmentBackend, WardenConfig, WardenMode } from "./config.js";
 import { classifyToolResult, doneNudge, emptyEvidence, evaluateDone, finalAssistantText, formatDone, needsDoneCheck, recordOutcome } from "./done.js";
 import type { RunEvidence } from "./done.js";
 import { evaluateAction, formatVerdict, intentSteer, offTaskSteer, SLOP_LABELS, SteerRepeatWindow, steerReason } from "./guard.js";
@@ -37,6 +37,43 @@ import type { GuardName, TraceEntry } from "./trace.js";
 import { DEFAULT_TEMPLATES, proseTokens, renderTemplate, statusWidget, TOKEN_NAMES } from "./widget.js";
 
 export const disclosure = "With TypeSafe judgments enabled, pi-warden sends to api.typesafe.ai: your latest request and up to eight redacted prior user/assistant text messages for task context, plus a redacted, truncated summary of each guarded bash, write, or edit call before it runs, with the agent's own words from the message that makes the call (its stated plan); for a write or edit in a project with a rules file (pi-warden.md, the configured files, or README/CLAUDE/AGENTS as fallback), a larger redacted sample of the written content with the current file around each edit and the rule text; the last few tool calls and output tails when the agent keeps failing; the agent's final message when it reports completion without running checks; redacted tool-output samples for security and context saving (retention and output format); a redacted sample of an async subagent report that names a failure, a stop, or a question, with your latest request, when warden decides whether that report should wake the agent; and, on the first guarded call after your reply, the redacted summaries of the calls allowed in the previous turn, so Jev can say whether your reply regrets one of them. Compression and duplicate notes store an exact, owner-only copy in a temporary file on this machine; the hold feedback log stores tool names, pattern ids, scores, and outcomes (never commands) in an owner-only file under Pi's agent directory. Requests may incur charges. Secret redaction is best-effort. Results are model judgments, not proof or authorization; offline pattern checks stay active either way.";
+
+/**
+ * The two facts warden must state about a backend on its own: where the requests land (the disclosure and the status line
+ * name it) and which environment variable carries its credential (the judge is not built without one).
+ *
+ * This mirrors pi-typesafe's own backend table, which is the real source: once the dependency floor includes the release
+ * that exports it, read `baseURL`/`keyEnv` from there and delete this table rather than maintaining a second copy.
+ */
+export const BACKENDS: Record<JudgmentBackend, { host: string; keyEnv?: string }> = {
+  typesafe: { host: "api.typesafe.ai" },
+  openrouter: { host: "openrouter.ai", keyEnv: "TYPESAFE_OPENROUTER_API_KEY" },
+};
+
+/**
+ * The disclosure names its destination, so a non-default backend must not show the default text. Substituted rather than
+ * copied: two hand-maintained copies of this paragraph would drift, and the consent text is the one place that cannot be
+ * stale. `disclosure` itself stays byte-identical for the default backend.
+ */
+export function disclosureFor(backend: JudgmentBackend): string {
+  return backend === "typesafe" ? disclosure : disclosure.replace(BACKENDS.typesafe.host, BACKENDS[backend].host);
+}
+
+/**
+ * Config to pi-typesafe client options. `backend` is passed only when it is not the default, so a session that never
+ * touched the setting builds the exact same client as before this option existed.
+ *
+ * The intersection is deliberate: `backend` lands in `TypeSafeOptions` in the pi-typesafe release that implements it, and
+ * this compiles against the current 0.5.x too, where an older client simply ignores the extra key (its constructor reads
+ * named options and passes nothing else through). Drop the intersection once the dependency floor includes `backend`.
+ */
+export function judgeOptions(config: WardenConfig): TypeSafeOptions & { backend?: JudgmentBackend } {
+  return {
+    maxRequests: config.maxRequests,
+    timeoutMs: config.timeoutMs,
+    ...(config.typesafeBackend === "typesafe" ? {} : { backend: config.typesafeBackend }),
+  };
+}
 
 const WIDGET = PACKAGE_NAME;
 const CONFIRM_TEXT_LIMIT = 500;
@@ -241,10 +278,20 @@ export default function wardenExtension(pi: ExtensionAPI): void {
   };
   const consentGiven = (config: WardenConfig) => config.typesafe || process.env.PI_WARDEN_ENABLED === "1";
   const consentSource = (config: WardenConfig) => config.typesafe ? "/warden enable" : process.env.PI_WARDEN_ENABLED === "1" ? "PI_WARDEN_ENABLED" : undefined;
-  /** A consent flag is not proof that judgments happen; ask pi-typesafe for the real key state. */
+  /**
+   * A consent flag is not proof that judgments happen; ask pi-typesafe for the real key state.
+   *
+   * The TypeSafe keystore vouches only for the TypeSafe backend. A backend with its own `keyEnv` resolves its credential
+   * from the environment inside pi-typesafe and never touches the keystore, so blocking on `authState()` there would
+   * refuse a working setup because a key it does not use is missing.
+   */
+  const keyUsable = (config: WardenConfig): boolean => {
+    const keyEnv = BACKENDS[config.typesafeBackend].keyEnv;
+    return keyEnv ? (process.env[keyEnv]?.trim() ?? "") !== "" : authState().usable;
+  };
   const judgeFor = (config: WardenConfig): TypeSafe | undefined => {
-    if (!consentGiven(config) || budgetExhausted || !authState().usable) return undefined;
-    return client ??= createTypeSafe({ maxRequests: config.maxRequests, timeoutMs: config.timeoutMs });
+    if (!consentGiven(config) || budgetExhausted || !keyUsable(config)) return undefined;
+    return client ??= createTypeSafe(judgeOptions(config));
   };
   const noteError = (ctx: ExtensionContext, message: string, code: string | undefined) => {
     stats.errors++;
@@ -892,7 +939,7 @@ export default function wardenExtension(pi: ExtensionAPI): void {
           const usage = client?.getUsage();
           const guards = [config.action.enabled && "action", config.stuck.enabled && "stuck", config.done.enabled && "done-check", config.slop.enabled && "slop", config.slop.enabled && config.slop.prose.enabled && `prose (${config.slop.prose.audience})`, config.security.enabled && "security", config.rules.enabled && "rules", config.context.enabled && "context", config.runaway.enabled && "runaway", config.subagent.enabled && "subagent triage", config.notify.enabled && "desktop notifications"].filter(Boolean).join(", ");
           report([
-            `pi-warden: ${config.enabled ? `guarding ${config.action.tools.join(", ")} (${guards})` : "off"}; mode ${activeMode(config, ctx.hasUI)}; TypeSafe judgments ${source ? `consented via ${source}` : "not consented (run /warden enable)"}; ${auth.text}`,
+            `pi-warden: ${config.enabled ? `guarding ${config.action.tools.join(", ")} (${guards})` : "off"}; mode ${activeMode(config, ctx.hasUI)}; backend ${config.typesafeBackend} (${BACKENDS[config.typesafeBackend].host}); TypeSafe judgments ${source ? `consented via ${source}` : "not consented (run /warden enable)"}; ${auth.text}`,
             `Session: ${stats.inspected} inspected, ${stats.judged} judged, ${stats.warned} warned, ${stats.held} held, ${stats.approved} approved on retry, ${stats.offPlan} off plan, ${stats.offTask} off task, ${stats.slop} slop notes, ${stats.ruleViolations}/${stats.ruleChecks} rule violations, ${stats.pathNotes} sensitive-path notes, ${stats.stuck}/${stats.stuckChecks} stuck, ${stats.unverified}/${stats.doneChecks} unverified done, ${stats.proseNudges}/${stats.proseChecks} prose nudges, ${stats.runaway} runaway stops, ${stats.subagentWoken}/${stats.subagentReports} subagent reports woken, ${stats.restatements} restatements, ${stats.errors} TypeSafe errors; ${usage?.requestsStarted ?? 0}/${config.maxRequests} requests. Steers are ${config.steerVisible ? "shown in the transcript" : "hidden from the transcript (trace panel shows them)"}. Steer budget: ${config.steerBudget === 0 ? "off" : `${config.steerBudget} per run`}.`,
             formatSteers(stats),
             `Thresholds: irreversible warn ${config.action.irreversible.warn} / hold ${config.action.irreversible.confirm}; off-task warn ${config.action.offTask.warn} / steer ${config.action.offTask.steer} (never holds); intent mismatch ${config.action.intentMismatch} (${config.action.visibleMismatch} on a visible action); stuck same-strategy ${config.stuck.sameStrategy} after ${config.stuck.minFailures} failures; done claims ${config.done.claimsDone}; slop ${config.slop.threshold}, rules ${config.rules.threshold}, prose ${config.slop.prose.threshold} in ${config.slop.prose.trend}/3 replies; runaway ${config.runaway.repeats} repeats (thinking ${config.runaway.thinkingRepeats}), recover ${config.runaway.recover}; failOpen ${config.action.failOpen}.`,
@@ -917,7 +964,7 @@ export default function wardenExtension(pi: ExtensionAPI): void {
         }
         if (action === "enable") {
           if (!ctx.hasUI) { report("Consent needs an interactive session. For headless runs set PI_WARDEN_ENABLED=1 and TYPESAFE_API_KEY explicitly.", "warning"); return; }
-          if (!await ctx.ui.confirm("Enable TypeSafe judgments for pi-warden?", disclosure)) return;
+          if (!await ctx.ui.confirm("Enable TypeSafe judgments for pi-warden?", disclosureFor(config.typesafeBackend))) return;
           // One flow: consent, then a key if none is configured yet (hidden input, verified, stored for every pi-typesafe consumer).
           const key = await ensureApiKey(ctx);
           if (!key) { report("No key entered; pi-warden stays on pattern checks only. Run /warden enable again when you have a key from console.typesafe.ai.", "warning"); return; }
@@ -955,7 +1002,7 @@ export default function wardenExtension(pi: ExtensionAPI): void {
         }
         if (action === "test") {
           const judge = judgeFor(config);
-          if (judge && ctx.hasUI && !await ctx.ui.confirm("Send one synthetic pi-warden test request?", `A synthetic action ("rm -rf /tmp/pi-warden-demo" for the task "Clean up the demo directory") goes to api.typesafe.ai and may incur charges. ${disclosure}`)) return;
+          if (judge && ctx.hasUI && !await ctx.ui.confirm("Send one synthetic pi-warden test request?", `A synthetic action ("rm -rf /tmp/pi-warden-demo" for the task "Clean up the demo directory") goes to ${BACKENDS[config.typesafeBackend].host} and may incur charges. ${disclosureFor(config.typesafeBackend)}`)) return;
           const verdict = await evaluateAction(
             { tool: "bash", input: { command: "rm -rf /tmp/pi-warden-demo" }, cwd: ctx.cwd, task: "Clean up the demo directory" },
             { config: { ...config.action, enabled: true, tools: ["bash"] }, judge },

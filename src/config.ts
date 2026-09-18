@@ -163,10 +163,17 @@ export function isRecallTool(value: unknown): value is RecallTool {
 
 export type WardenMode = "steer" | "confirm" | "advise";
 
+/**
+ * Which decisions service answers the judgments. A closed enum, not a URL: pi-typesafe picks the path and the model id per
+ * backend, and a free-form destination would let a config file redirect judgments anywhere. `typesafe` is the default and
+ * the only one that uses the TypeSafe keystore; `openrouter` reads its own credential (see docs/data-handling.md).
+ */
+export type JudgmentBackend = "typesafe" | "openrouter";
+
 export interface WardenConfig {
   /** Master switch. false disables every guard, including offline pattern checks. */
   enabled: boolean;
-  /** Consent to send task and action summaries to api.typesafe.ai. Set by /warden enable; never by a project file. */
+  /** Consent to send task and action summaries to the judgment backend. Set by /warden enable; never by a project file. */
   typesafe: boolean;
   /**
    * steer (default): a confirm-level call is held and the agent receives the judgment as its tool result, so it re-plans or asks
@@ -178,6 +185,8 @@ export interface WardenConfig {
   timeoutMs: number;
   /** Maximum TypeSafe requests per session across all guards. */
   maxRequests: number;
+  /** The decisions service the judgments go to. User file only: a project must not redirect judgments to another vendor. */
+  typesafeBackend: JudgmentBackend;
   action: ActionGuardConfig;
   stuck: StuckGuardConfig;
   done: DoneGuardConfig;
@@ -213,6 +222,7 @@ export function defaultConfig(): WardenConfig {
     mode: "steer",
     timeoutMs: 5000,
     maxRequests: 500,
+    typesafeBackend: "typesafe",
     action: {
       enabled: true,
       tools: [...COMMAND_TOOLS, "write", "edit"],
@@ -297,6 +307,10 @@ function positiveInteger(value: unknown, fallback: number): number {
 
 export function isMode(value: unknown): value is WardenMode {
   return value === "steer" || value === "confirm" || value === "advise";
+}
+
+export function isJudgmentBackend(value: unknown): value is JudgmentBackend {
+  return value === "typesafe" || value === "openrouter";
 }
 
 function applyAction(base: ActionGuardConfig, raw: unknown, timeoutMs: number): ActionGuardConfig {
@@ -463,6 +477,7 @@ export function applyUserOverrides(base: WardenConfig, raw: unknown): WardenConf
     enabled: boolean(raw.enabled, base.enabled),
     typesafe: boolean(raw.typesafe, base.typesafe),
     mode: isMode(raw.mode) ? raw.mode : base.mode,
+    typesafeBackend: isJudgmentBackend(raw.typesafeBackend) ? raw.typesafeBackend : base.typesafeBackend,
     ...shared,
     ...applyGuards(base, raw, shared.timeoutMs, "user"),
     widget: applyWidget(base.widget, raw.widget),
@@ -472,7 +487,7 @@ export function applyUserOverrides(base: WardenConfig, raw: unknown): WardenConf
   };
 }
 
-/** Project files may tune the guards but cannot grant TypeSafe consent, change the mode, or raise budgets. */
+/** Project files may tune the guards but cannot grant TypeSafe consent, change the mode or backend, or raise budgets. */
 export function applyProjectOverrides(base: WardenConfig, raw: unknown): WardenConfig {
   if (!isObject(raw)) return base;
   return { ...base, enabled: boolean(raw.enabled, base.enabled), ...applyGuards(base, raw, base.timeoutMs, "project") };

@@ -1,4 +1,4 @@
-import { isMode } from "./config.js";
+import { isJudgmentBackend, isMode } from "./config.js";
 import type { WardenConfig } from "./config.js";
 import { DEFAULT_TEMPLATES } from "./widget.js";
 
@@ -34,6 +34,8 @@ export function completeConfig(loaded: Partial<WardenConfig> | undefined): Shape
     mode: isMode(source.mode) ? source.mode : "steer",
     timeoutMs: source.timeoutMs ?? 5000,
     maxRequests: source.maxRequests ?? 500,
+    // A config module older than this field leaves it undefined; the default destination is the only safe fallback.
+    typesafeBackend: isJudgmentBackend(source.typesafeBackend) ? source.typesafeBackend : "typesafe",
     steerVisible: source.steerVisible ?? false,
     notices: source.notices ?? false,
     steerBudget: typeof source.steerBudget === "number" && source.steerBudget >= 0 ? source.steerBudget : 3,

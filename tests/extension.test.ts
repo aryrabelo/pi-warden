@@ -1558,3 +1558,42 @@ test("a final reply that restates this run's earlier reply is counted, not steer
   await runCommand("status", context({ hasUI: false }));
   assert.match(sentMessages.at(-1)!.message.content, /1 restatements/, "the same answer to a new prompt does not count again");
 });
+
+test("the backend option is forwarded only when it is not the default, and names its own destination", async () => {
+  const { BACKENDS, disclosure, disclosureFor, judgeOptions } = await import("../src/extension.js");
+  const { defaultConfig } = await import("../src/config.js");
+  const base = defaultConfig();
+
+  assert.deepEqual(judgeOptions(base), { maxRequests: base.maxRequests, timeoutMs: base.timeoutMs },
+    "a session that never touched the setting must build the client exactly as it did before this option existed");
+  assert.deepEqual(judgeOptions({ ...base, typesafeBackend: "openrouter" }),
+    { maxRequests: base.maxRequests, timeoutMs: base.timeoutMs, backend: "openrouter" });
+
+  assert.equal(disclosureFor("typesafe"), disclosure, "the default consent text is unchanged, character for character");
+  const redirected = disclosureFor("openrouter");
+  assert.ok(redirected.includes(BACKENDS.openrouter.host), "consent must name where the data actually goes");
+  assert.ok(!redirected.includes(BACKENDS.typesafe.host), "and must not still claim the default destination");
+  assert.equal(redirected.length - BACKENDS.openrouter.host.length, disclosure.length - BACKENDS.typesafe.host.length,
+    "only the destination differs; the paragraph itself is one text, not two copies");
+});
+
+test("a non-default backend judges on its own credential and never on the TypeSafe keystore", async () => {
+  const savedBackendKey = process.env.TYPESAFE_OPENROUTER_API_KEY;
+  delete process.env.TYPESAFE_OPENROUTER_API_KEY;
+  await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true, typesafeBackend: "openrouter" }));
+  try {
+    // TYPESAFE_API_KEY is set for this whole suite, so the keystore says "usable" here: a gate that consults it would judge.
+    assert.equal(await toolCall("bash", { command: "npm test" }), undefined);
+    assert.equal(networkCalls, 0, "without that backend's own credential there is no judge, and no request on the TypeSafe key");
+
+    process.env.TYPESAFE_OPENROUTER_API_KEY = "offline-backend-key";
+    assert.equal(await toolCall("bash", { command: "npm test" }), undefined);
+    assert.equal(networkCalls, 1, "its own credential is what builds the judge");
+
+    await runCommand("status");
+    assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "status names the destination in force");
+  } finally {
+    if (savedBackendKey === undefined) delete process.env.TYPESAFE_OPENROUTER_API_KEY;
+    else process.env.TYPESAFE_OPENROUTER_API_KEY = savedBackendKey;
+  }
+});
