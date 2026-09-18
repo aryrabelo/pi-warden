@@ -58,17 +58,35 @@ jobs:
       - name: o que o Jev disse
         run: |
           set -uo pipefail
-          printf 'exit_code          = %s\n' '${{ steps.jev.outputs.exit_code }}'
-          printf 'human              = %s\n' '${{ steps.jev.outputs.human }}'
-          printf 'fail_open_triggered= %s\n' '${{ steps.jev.outputs.fail_open_triggered }}'
-          printf 'control_status     = %s\n' '${{ steps.jev.outputs.control_status }}'
-          printf '\n--- linha JSON canonica ---\n%s\n' '${{ steps.jev.outputs.json }}'
+          exit_code='${{ steps.jev.outputs.exit_code }}'
+          human='${{ steps.jev.outputs.human }}'
+          fail_open='${{ steps.jev.outputs.fail_open_triggered }}'
+          control_status='${{ steps.jev.outputs.control_status }}'
 
-          # A prova desta corrida e o CONTROLE, nao o veredito: se o juiz errou um
-          # caso de resposta conhecida, o veredito do PR ja foi descartado la dentro.
-          case '${{ steps.jev.outputs.control_status }}' in
-            ok)            echo "::notice::controle calibrado dentro da banda" ;;
-            fora_da_banda) echo "::warning::juiz fora de calibracao - veredito descartado" ;;
-            ausente)       echo "::warning::corrida SEM controle declarado" ;;
-            *)             echo "::warning::controle nao pode ser lido (status=erro)" ;;
+          vazios=''
+          [ -z "$exit_code" ] && vazios='exit_code'
+          [ -z "$control_status" ] && vazios="${vazios:+$vazios e }control_status"
+          if [ -n "$vazios" ]; then
+            printf '::error title=Jev nao rodou::a action nao exportou %s. Ela falhou ANTES de escrever o GITHUB_OUTPUT e o continue-on-error mascarou o job como verde -- output vazio NAO e veredito. Abra o log do step jev e procure outcome=failure.\n' "$vazios"
+            exit 1
+          fi
+
+          printf 'exit_code=%s human=%s fail_open=%s control=%s\n' \
+            "$exit_code" "$human" "$fail_open" "$control_status"
+
+          if [ "$exit_code" = '4' ]; then
+            echo '::warning title=Jev sem veredito::fail-open — o PR NAO foi reprovado, mas ninguem julgou o aceite.'
+          fi
+          if [ "$exit_code" = '2' ]; then
+            echo '::error title=.jev/acceptance.yml invalido::corrija o contrato de aceite do repo.'
+            exit 1
+          fi
+          # O controle nunca reprova o PR: ele diz se o VEREDITO vale.
+          case "$control_status" in
+            fora_da_banda)
+              echo '::warning title=Jev descartou o veredito::controle calibrado fora da banda — o juiz errou um caso de resposta conhecida nesta corrida. Nome, valor e banda no Summary.' ;;
+            ausente)
+              echo '::notice title=Jev sem controle::esta corrida rodou SEM controle calibrado: nada nela diz se o juiz esta calibrado. Declare `control:` no .jev/acceptance.yml.' ;;
+            erro)
+              echo '::warning title=Jev com controle ilegivel::nao foi possivel ler o controle desta corrida; trate o veredito como NAO auditado (erro nunca e ok).' ;;
           esac

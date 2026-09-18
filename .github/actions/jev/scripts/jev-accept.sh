@@ -86,6 +86,33 @@ tool_error() {
   warn "erro de ferramenta: $TOOL_ERROR"
 }
 
+# Every path this script writes to hangs off WORK, so WORK EMPTY means writing to the
+# filesystem root: measured on run 35383583018, where `/curl.err`, `/config.err` and
+# `/config.json` came back "Permission denied" and the job died with exit 2 — from a
+# line that ignored mktemp's status. `mktemp -d TEMPLATE` needs the template's PARENT
+# to already exist, and on ubuntu-latest TMPDIR is unset AND `$HOME/.cache` does not
+# exist, so the old `${TMPDIR:-$HOME/.cache}/jev.XXXXXX` template simply failed there.
+#
+# A set TMPDIR is AUTHORITATIVE: the fleet points it at ~/Sites/temp-files and the
+# no-tmp-writes rule needs it honoured, so a TMPDIR that cannot hold the directory is a
+# TOOL error, never a quiet fallback to somewhere else. With TMPDIR absent the choice
+# belongs to `mktemp` itself — hardcoding `/tmp` here would take it away.
+make_workdir() {
+  local dir=""
+  if [ -n "${TMPDIR:-}" ]; then
+    dir="$(mktemp -d "${TMPDIR%/}/jev.XXXXXX" 2>/dev/null)" || dir=""
+  else
+    dir="$(mktemp -d 2>/dev/null)" || dir=""
+  fi
+  if [ -n "$dir" ] && [ -d "$dir" ] && [ -w "$dir" ]; then
+    WORK="$dir"
+    return 0
+  fi
+  WORK=""
+  tool_error "nao consegui criar o diretorio temporario de trabalho (mktemp -d${TMPDIR:+ em TMPDIR=$TMPDIR}); nada foi escrito"
+  return 1
+}
+
 # Minimal JSON string escaping, for the one line that must be emitted when `jq` itself
 # is what went missing. Only what is reachable here: backslash, quote, newline, tab, CR.
 json_str() {
@@ -773,14 +800,21 @@ main() {
     usage
   }
 
-  WORK="$(mktemp -d "${TMPDIR:-$HOME/.cache}/jev.XXXXXX")"
-  : >"$WORK/gh.err"
-  : >"$WORK/curl.err"
   TOOL_ERROR=""
   FAIL_DETAIL=""
   TRUNCATED=false
   GRAPH_JSON='[]'
   CONTEXT=""
+
+  # No workdir, no run: with WORK empty every path below would be `/<file>`. This exits
+  # through the printf-built line on purpose — the same path a missing `jq` takes, and
+  # the only one that does not itself need a file in WORK.
+  if ! make_workdir; then
+    tool_error_exit "$pr" "$repo"
+    return $?
+  fi
+  : >"$WORK/gh.err"
+  : >"$WORK/curl.err"
 
   local cfg_path
   if ! cfg_path="$(find_config)"; then
