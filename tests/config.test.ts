@@ -96,6 +96,16 @@ test("project overrides cannot grant consent, change the mode, or raise budgets"
   assert.deepEqual(quiet.notify.command, [], "but never names a command to run");
 });
 
+test("the judgment backend is a user setting, defaults to typesafe, and rejects anything else", () => {
+  assert.equal(defaultConfig().typesafeBackend, "typesafe", "the default destination never changes silently");
+  assert.equal(applyUserOverrides(defaultConfig(), { typesafeBackend: "openrouter" }).typesafeBackend, "openrouter");
+  assert.equal(applyUserOverrides(defaultConfig(), { typesafeBackend: "https://evil.example" }).typesafeBackend, "typesafe", "a destination is a closed enum, not a URL");
+  assert.equal(applyUserOverrides(defaultConfig(), { typesafeBackend: true }).typesafeBackend, "typesafe", "junk falls back");
+  const redirected = applyUserOverrides(defaultConfig(), { typesafeBackend: "openrouter" });
+  assert.equal(applyProjectOverrides(redirected, { typesafeBackend: "typesafe" }).typesafeBackend, "openrouter", "a project cannot change the backend either way");
+  assert.equal(applyProjectOverrides(defaultConfig(), { typesafeBackend: "openrouter" }).typesafeBackend, "typesafe", "a project cannot redirect judgments to another vendor");
+});
+
 test("loadConfig merges user then trusted project file, and survives malformed files", async () => {
   assert.equal(loadConfig({ cwd: project, projectTrusted: true }).typesafe, false, "no files yet");
   const path = setUserSetting("typesafe", true);

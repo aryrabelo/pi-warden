@@ -1,4 +1,4 @@
-import { isMode } from "./config.js";
+import { isJudgmentBackend, isMode } from "./config.js";
 import type { WardenConfig } from "./config.js";
 import { DEFAULT_TEMPLATES } from "./widget.js";
 
@@ -34,10 +34,13 @@ export function completeConfig(loaded: Partial<WardenConfig> | undefined): Shape
     mode: isMode(source.mode) ? source.mode : "steer",
     timeoutMs: source.timeoutMs ?? 5000,
     maxRequests: source.maxRequests ?? 500,
+    // A config module older than this field leaves it undefined; the default destination is the only safe fallback.
+    typesafeBackend: isJudgmentBackend(source.typesafeBackend) ? source.typesafeBackend : "typesafe",
     steerVisible: source.steerVisible ?? false,
     notices: source.notices ?? false,
+    steerBudget: typeof source.steerBudget === "number" && source.steerBudget >= 0 ? source.steerBudget : 3,
     action: section("action", { ...off, tools: [], failOpen: true, timeoutMs: 5000, irreversible: { warn: 1, confirm: 1 }, offTask: { warn: 1, steer: 1 }, intentMismatch: 1, visibleMismatch: 1, feedbackLog: false }),
-    stuck: section("stuck", { ...off, window: 12, minFailures: 3, cooldown: 3, sameStrategy: 1, nudge: false }),
+    stuck: section("stuck", { ...off, window: 12, minFailures: 3, cooldown: 3, sameStrategy: 1, churnThreshold: 5, nudge: false }),
     done: section("done", { ...off, claimsDone: 1, nudge: false }),
     slop: section("slop", { ...off, threshold: 1, prose: proseOff() }),
     security: section("security", { ...off, threshold: 1 }),

@@ -30,6 +30,15 @@ test("regression: the live crash shape (slop without prose) and older module sha
   assert.equal(empty.config.enabled, true);
 });
 
+test("a config module without the backend field falls back to the default destination", () => {
+  const older = defaultConfig() as unknown as Record<string, unknown>;
+  delete older.typesafeBackend;
+  assert.equal(completeConfig(older as never).config.typesafeBackend, "typesafe", "an absent destination is never inferred");
+  const junk = { ...defaultConfig(), typesafeBackend: "elsewhere" } as unknown as Record<string, unknown>;
+  assert.equal(completeConfig(junk as never).config.typesafeBackend, "typesafe");
+  assert.equal(completeConfig({ ...defaultConfig(), typesafeBackend: "openrouter" }).config.typesafeBackend, "openrouter", "a valid choice survives");
+});
+
 test("a 0.7 config module without the runaway and notify sections disables both and renders the default widget line", () => {
   const older = defaultConfig() as unknown as Record<string, unknown>;
   delete older.runaway;

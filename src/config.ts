@@ -47,6 +47,8 @@ export interface StuckGuardConfig {
   cooldown: number;
   /** P(same strategy) at or above this reports the agent as stuck. */
   sameStrategy: number;
+  /** Calls to the same target (same tool + input key) that trigger churn detection. */
+  churnThreshold: number;
   /** Also steer the agent with a short message, not only the user. */
   nudge: boolean;
 }
@@ -161,10 +163,17 @@ export function isRecallTool(value: unknown): value is RecallTool {
 
 export type WardenMode = "steer" | "confirm" | "advise";
 
+/**
+ * Which decisions service answers the judgments. A closed enum, not a URL: pi-typesafe picks the path and the model id per
+ * backend, and a free-form destination would let a config file redirect judgments anywhere. `typesafe` is the default and
+ * the only one that uses the TypeSafe keystore; `openrouter` reads its own credential (see docs/data-handling.md).
+ */
+export type JudgmentBackend = "typesafe" | "openrouter";
+
 export interface WardenConfig {
   /** Master switch. false disables every guard, including offline pattern checks. */
   enabled: boolean;
-  /** Consent to send task and action summaries to api.typesafe.ai. Set by /warden enable; never by a project file. */
+  /** Consent to send task and action summaries to the judgment backend. Set by /warden enable; never by a project file. */
   typesafe: boolean;
   /**
    * steer (default): a confirm-level call is held and the agent receives the judgment as its tool result, so it re-plans or asks
@@ -176,6 +185,8 @@ export interface WardenConfig {
   timeoutMs: number;
   /** Maximum TypeSafe requests per session across all guards. */
   maxRequests: number;
+  /** The decisions service the judgments go to. User file only: a project must not redirect judgments to another vendor. */
+  typesafeBackend: JudgmentBackend;
   action: ActionGuardConfig;
   stuck: StuckGuardConfig;
   done: DoneGuardConfig;
@@ -193,6 +204,10 @@ export interface WardenConfig {
   steerVisible: boolean;
   /** Per-call warning notices ("warden · …") in the transcript. Off by default; the widget and trace panel always show them. */
   notices: boolean;
+  /** Steers delivered to the agent per run before further non-critical ones are recorded in the trace only. Every delivered
+   * steer costs at least one LLM turn, and a closing run that collects six notices collects six restatements of the final
+   * status. 0 disables the budget. Critical guards (stuck, done, runaway, subagent wake) always deliver. */
+  steerBudget: number;
 }
 
 export const PACKAGE_NAME = "pi-warden";
@@ -207,6 +222,7 @@ export function defaultConfig(): WardenConfig {
     mode: "steer",
     timeoutMs: 5000,
     maxRequests: 500,
+    typesafeBackend: "typesafe",
     action: {
       enabled: true,
       tools: [...COMMAND_TOOLS, "write", "edit"],
@@ -218,7 +234,7 @@ export function defaultConfig(): WardenConfig {
       visibleMismatch: 0.8,
       feedbackLog: true,
     },
-    stuck: { enabled: true, window: 12, minFailures: 3, cooldown: 3, sameStrategy: 0.7, nudge: true },
+    stuck: { enabled: true, window: 12, minFailures: 3, cooldown: 3, sameStrategy: 0.7, churnThreshold: 5, nudge: true },
     done: { enabled: true, claimsDone: 0.7, nudge: true },
     slop: { enabled: true, threshold: 0.7, prose: { enabled: true, audience: "technical", threshold: 0.7, trend: 2, minChars: 200 } },
     security: { enabled: true, threshold: 0.7 },
@@ -230,6 +246,7 @@ export function defaultConfig(): WardenConfig {
     widget: defaultWidgetConfig(),
     steerVisible: false,
     notices: false,
+    steerBudget: 3,
   };
 }
 
@@ -292,6 +309,10 @@ export function isMode(value: unknown): value is WardenMode {
   return value === "steer" || value === "confirm" || value === "advise";
 }
 
+export function isJudgmentBackend(value: unknown): value is JudgmentBackend {
+  return value === "typesafe" || value === "openrouter";
+}
+
 function applyAction(base: ActionGuardConfig, raw: unknown, timeoutMs: number): ActionGuardConfig {
   const withTimeout = { ...base, timeoutMs };
   if (!isObject(raw)) return withTimeout;
@@ -318,6 +339,7 @@ function applyStuck(base: StuckGuardConfig, raw: unknown): StuckGuardConfig {
     minFailures: Math.min(window, positiveInteger(raw.minFailures, base.minFailures)),
     cooldown: positiveInteger(raw.cooldown, base.cooldown),
     sameStrategy: probability(raw.sameStrategy, base.sameStrategy),
+    churnThreshold: Math.min(window, positiveInteger(raw.churnThreshold, base.churnThreshold)),
     nudge: boolean(raw.nudge, base.nudge),
   };
 }
@@ -455,15 +477,17 @@ export function applyUserOverrides(base: WardenConfig, raw: unknown): WardenConf
     enabled: boolean(raw.enabled, base.enabled),
     typesafe: boolean(raw.typesafe, base.typesafe),
     mode: isMode(raw.mode) ? raw.mode : base.mode,
+    typesafeBackend: isJudgmentBackend(raw.typesafeBackend) ? raw.typesafeBackend : base.typesafeBackend,
     ...shared,
     ...applyGuards(base, raw, shared.timeoutMs, "user"),
     widget: applyWidget(base.widget, raw.widget),
     steerVisible: boolean(raw.steerVisible, base.steerVisible),
     notices: boolean(raw.notices, base.notices),
+    steerBudget: typeof raw.steerBudget === "number" && Number.isInteger(raw.steerBudget) && raw.steerBudget >= 0 ? raw.steerBudget : base.steerBudget,
   };
 }
 
-/** Project files may tune the guards but cannot grant TypeSafe consent, change the mode, or raise budgets. */
+/** Project files may tune the guards but cannot grant TypeSafe consent, change the mode or backend, or raise budgets. */
 export function applyProjectOverrides(base: WardenConfig, raw: unknown): WardenConfig {
   if (!isObject(raw)) return base;
   return { ...base, enabled: boolean(raw.enabled, base.enabled), ...applyGuards(base, raw, base.timeoutMs, "project") };

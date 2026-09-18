@@ -263,18 +263,33 @@ test("tail compression stores exact full output and preserves done-check evidenc
   } finally { await rm(join(path, ".."), { recursive: true, force: true }); }
 });
 
-test("multiple text blocks keep their positions and are not compressed", async () => {
+test("multi-block results: retention is decided per text block, order and non-text parts stay", async () => {
   await grantConsent();
-  nextAnswers = { injection: 0.95, retention: "summary_only" };
+  nextAnswers = { retention: "summary_only" };
   const first = "first block\n".repeat(1000);
-  const last = "last block\n".repeat(1000);
+  const last = "last block!\n".repeat(1000);
   const image = { type: "image", data: "synthetic", mimeType: "image/png" };
-  const patch = await fire("tool_result", { toolName: "read", input: {}, toolCallId: "mixed", isError: false, content: [{ type: "text", text: first }, image, { type: "text", text: last }] }) as { content: Array<{ text?: string }> };
+  const patch = await fire("tool_result", { toolName: "read", input: {}, toolCallId: "mixed", isError: false, content: [{ type: "text", text: first }, image, { type: "text", text: last }] }) as { content: Array<{ type: string; text?: string }> };
   assert.equal(patch.content.length, 3);
-  assert.strictEqual(patch.content[1], image);
-  assert.ok(patch.content[0]!.text!.includes(first));
-  assert.ok(patch.content[2]!.text!.includes(last));
-  assert.ok(!("retention" in requests.at(-1)!.questions));
+  assert.strictEqual(patch.content[1], image, "the image block keeps its position untouched");
+  assert.match(patch.content[0]!.text!, /pi-warden: summary_only; 12000 original characters/, "the first block is compressed on its own retention");
+  assert.match(patch.content[0]!.text!, /first block/, "the first block's excerpt carries its own content");
+  assert.match(patch.content[2]!.text!, /pi-warden: summary_only; 12000 original characters/, "the last block is compressed separately");
+  assert.match(patch.content[2]!.text!, /last block/);
+  assert.ok(!patch.content[0]!.text!.includes("last block"), "blocks are judged and excerpted separately, not flattened");
+  assert.equal(requests.filter(request => "retention" in request.questions).length, 2, "each large text block earns its own retention request");
+  await runCommand("trace", context({ hasUI: false }));
+  assert.match(sentMessages.at(-1)!.message.content, /text block 1 of 2[\s\S]*text block 2 of 2/, "the trace names each compressed block");
+});
+
+test("a credential in one text block banners that block only; siblings stay untouched", async () => {
+  const patch = await fire("tool_result", { toolName: "read", input: {}, toolCallId: "mixed-secret", isError: false, content: [{ type: "text", text: "plain prose\n".repeat(50) }, { type: "text", text: "TOKEN=ghp_Qk7mZ2pR9vT4xL8nW3sY6bD1cF5hJ0aM" }, { type: "text", text: "more prose\n".repeat(50) }] }) as { content: Array<{ type: string; text?: string }> };
+  assert.equal(patch.content.length, 3);
+  assert.ok(!patch.content[0]!.text!.includes("pi-warden:"), "the clean first block is untouched");
+  assert.match(patch.content[1]!.text!, /Possible credentials in this output/, "the block carrying the secret earns the banner");
+  assert.match(patch.content[1]!.text!, /TOKEN=/, "the secret block's text is preserved, not dropped");
+  assert.match(patch.content[2]!.text!, /^more prose/, "the last block is untouched");
+  assert.equal(sentMessages.length, 1, "one security steer for the block that earned it");
 });
 
 test("secret warnings work offline; disabled output guards and failed requests preserve content", async () => {
@@ -445,7 +460,7 @@ test("the context saver keeps a ledger: candidates, compressions, token-turns, r
     await fire("turn_end", { turnIndex: 1, message: {}, toolResults: [] });
     await fire("turn_end", { turnIndex: 2, message: {}, toolResults: [] });
     await toolCall("read", { path });
-    assert.ok(widgets.at(-1)?.some(line => /context · read · full output recalled/.test(line)), "a recall shows on the status line");
+    assert.ok(widgets.at(-1)?.some(line => /^context\s+read · full output recalled/.test(line)), "a recall shows on the status line");
     await runCommand("status");
     const status = notices.at(-1)!.text;
     assert.match(status, /Context saver: 2 large outputs, 1 compressed, 0 duplicates dropped, \d+\.\d KB removed \(~\d+ tokens\), ~\d+ token-turns spared over 2 turns, 1 recall of the full output \(100%; 1 whole-file, 0 scoped\)/);
@@ -469,7 +484,7 @@ test("an identical repeated result becomes a duplicate note with a stored copy, 
   try {
     assert.match(await readFile(path, "utf8"), /ERROR: kept once/);
     assert.match(text, /Do not read the whole file/);
-    assert.ok(widgets.at(-1)?.some(line => /context · bash · duplicate/.test(line)));
+    assert.ok(widgets.at(-1)?.some(line => /^context\s+bash · duplicate/.test(line)));
     // A third copy reuses the stored file instead of writing another.
     const again = await toolResult("read", { path: "log.txt" }, full, false) as { content: Array<{ text: string }> };
     assert.equal(again.content[0]!.text.match(/Full output: (.+)/)![1], path);
@@ -531,7 +546,7 @@ test("per-call warning notices are off by default; the agent is still told, and 
   nextAnswers = { irreversible: 0.1, off_task: 0.95, scope: "unrelated" };
   assert.equal(await toolCall("write", { path: join(temporary, "poem.txt"), content: "roses" }), undefined);
   assert.equal(notices.length, 0, "no yellow warning in the transcript by default");
-  assert.match(widgets.at(-1)![0]!, /off task · warn$/, "the widget still shows the event");
+  assert.match(widgets.at(-1)![0]!, /^WARN\s+action\s+write · .*off task$/, "the widget still shows the event, as a warn chip");
   assert.match(sentMessages.at(-1)?.message.content ?? "", /^pi-warden: this write call looks unrelated/, "the agent is still told");
 
   await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true }));
@@ -587,7 +602,7 @@ test("the agent's plan comes from the message that makes the call, falls back to
   const steerSent = sentMessages.find(sent => sent.message.customType === "pi-warden-steer");
   assert.match(steerSent?.message.content ?? "", /^pi-warden: this bash call does something different from what you said you were about to do \(intent mismatch 0\.91\)\. It ran\./);
   assert.match(notices.at(-1)!.text, /^warden · bash: intent mismatch 0\.91 \(the call differs from the agent's stated plan\)$/);
-  assert.match(widgets.at(-1)![0]!, /off plan · warn$/);
+  assert.match(widgets.at(-1)![0]!, /^WARN\s+action\s+bash · .*off plan$/, "the mismatch leads the line as a warn chip");
 
   // No assistant text since the prompt: no plan, no question.
   const silent = branch({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "npm run clean" } }] } });
@@ -709,7 +724,7 @@ test("the Action guard is wired to the session: the prompt is the task, siblings
   assert.equal((await toolCall("bash", { command: "git push --force" }))?.block, true);
   prompt = "yes, go ahead and force push";
   assert.equal(await toolCall("bash", { command: "git push --force" }), undefined, "the reply reaches the guard as the task and releases the hold");
-  assert.match(widgets.at(-1)![0]!, /user approved · allow$/);
+  assert.match(widgets.at(-1)![0]!, /^ALLOW\s+action\s+bash · patterns: git-force-push · user approved$/, "an approval is a caveat: the allow keeps its own line");
   await runCommand("status");
   assert.match(notices.at(-1)!.text, /1 held, 1 approved on retry/, "the hook counts the hold and the approval");
 
@@ -758,12 +773,12 @@ test("mode confirm shows a dialog; mode advise only reports; PI_WARDEN_MODE over
   }
 });
 
-test("with consent, Jev judgments drive warn and hold, and the widget shows scores", async () => {
+test("with consent, Jev judgments drive warn and hold, and a quiet verdict folds to its chip", async () => {
   await grantConsent();
   nextAnswers = { irreversible: 0.2, off_task: 0.1, scope: "expected_step" };
   assert.equal(await toolCall("bash", { command: "npm test" }), undefined);
   assert.equal(networkCalls, 1);
-  assert.deepEqual(widgets.at(-1), ["warden · bash · irreversible 0.20 · off-task 0.10 · expected step · allow"]);
+  assert.deepEqual(widgets.at(-1), ["ALLOW action"], "the verdict leads and the scores the guard found nothing in fold away");
 
   nextAnswers = { irreversible: 0.92, off_task: 0.3, scope: "plausible_side_step" };
   const held = await toolCall("bash", { command: "npm run db:reset" });
@@ -778,7 +793,7 @@ test("with consent, Jev judgments drive warn and hold, and the widget shows scor
   assert.equal(await toolCall("write", { path: join(temporary, "poem.txt"), content: "roses" }), undefined);
   assert.match(notices.at(-1)!.text, /^warden · write: off-task 0\.95 \(unrelated to the request; agent steered\)$/);
   assert.match(sentMessages.at(-1)?.message.content ?? "", /^pi-warden: this write call looks unrelated to the user's request \(off-task 0\.95\)\. It ran\./);
-  assert.match(widgets.at(-1)![0]!, /off task · warn$/);
+  assert.match(widgets.at(-1)![0]!, /^WARN\s+action\s+write · .*off task$/, "the widget still shows the event, as a warn chip");
   await runCommand("status");
   assert.match(notices.at(-1)!.text, /1 off task,/);
   assert.match(notices.at(-1)!.text, /off-task warn 0\.6 \/ steer 0\.85 \(never holds\)/);
@@ -801,12 +816,14 @@ test("slop symptoms steer the agent after the write without holding it; steers a
   assert.match(sentMessages[0]!.message.content, /src\/a\.ts has stub or placeholder code where a working implementation is needed; hedging or vague notes\. Fix it in your next edit: replace stubs/);
   assert.deepEqual(sentMessages[0]!.options, { deliverAs: "steer" });
   assert.match(notices.at(-1)!.text, /warden · slop · src\/a\.ts/);
-  assert.match(widgets.at(-1)![0]!, /slop: stub 0\.92, hedging 0\.75/);
+  assert.match(widgets.at(-1)![0]!, /^ALLOW\s+action\s+write · .*slop: stub 0\.92, hedging 0\.75$/, "a named symptom is a finding: the allow keeps its own line");
 
   nextAnswers = { irreversible: 0.05, off_task: 0.05, scope: "expected_step", slop_stub: 0.1, slop_hedging: 0.1, slop_comments: 0.1, slop_dead: 0.1 };
   await toolCall("edit", { path: join(temporary, "src", "a.ts"), edits: [{ oldText: "a", newText: "b" }] });
   assert.equal(sentMessages.length, 1, "clean content: no steer");
-  assert.match(widgets.at(-1)![0]!, /slop: none/);
+  assert.deepEqual(widgets.at(-1), ["ALLOW action"], "nothing to see: `slop: none` folds with the rest");
+  await runCommand("status");
+  assert.match(notices.at(-1)!.text, /Last: warden · edit · .*slop: none · allow/, "/warden status still prints the raw line per guard");
 
   nextAnswers = { irreversible: 0.05, off_task: 0.05, scope: "expected_step", slop_stub: 0.9, slop_hedging: 0.1, slop_comments: 0.1, slop_dead: 0.1 };
   await toolCall("write", { path: join(temporary, "src", "b.ts"), content: "export const b = () => null; // TODO" });
@@ -814,7 +831,7 @@ test("slop symptoms steer the agent after the write without holding it; steers a
   assert.equal(sentMessages.length, 3);
   assert.match(sentMessages[2]!.message.content, /\(3th time this session\)[\s\S]*standing rule/);
 
-  await writeFile(configPath(), JSON.stringify({ typesafe: true, steerVisible: true }));
+  await writeFile(configPath(), JSON.stringify({ typesafe: true, steerVisible: true, steerBudget: 0 }));
   await toolCall("write", { path: join(temporary, "src", "d.ts"), content: "export const d = () => null; // TODO" });
   assert.equal((sentMessages[3]!.message as { display?: boolean }).display, true);
 });
@@ -839,13 +856,13 @@ test("rules: a write in a project with pi-warden.md gets its own request beside 
     assert.equal(sentMessages.length, 1, "slop and rules arrive as one steer");
     assert.match(sentMessages[0]!.message.content, /^pi-warden: the content just written to src\/r\.ts has stub or placeholder code[\s\S]*\n\npi-warden: the content just written to src\/r\.ts violates project rule from pi-warden\.md: "No console statements" \(0\.80\): Code must not contain `console\.log`\. Fix it in your next edit\.$/);
     assert.ok(notices.some(notice => /warden · rules · src\/r\.ts: No console statements \(0\.80\)/.test(notice.text)));
-    assert.ok(widgets.at(-1)!.some(line => /warden · rules · write src\/r\.ts · 2 rules · No console statements 0\.80 · violation/.test(line)), JSON.stringify(widgets.at(-1)));
+    assert.ok(widgets.at(-1)!.some(line => /^VIOLATION\s+rules\s+write src\/r\.ts · 2 rules · No console statements 0\.80$/.test(line)), JSON.stringify(widgets.at(-1)));
 
     // A clean write: judged, no steer; the widget line says so.
     nextAnswers = { irreversible: 0.05, off_task: 0.05, scope: "expected_step" };
     await toolCall("write", { path: join(temporary, "src", "clean.ts"), content: "export const clean = 1;" });
     assert.equal(sentMessages.length, 1);
-    assert.ok(widgets.at(-1)!.some(line => /warden · rules · write src\/clean\.ts · 2 rules · none · ok/.test(line)), JSON.stringify(widgets.at(-1)));
+    assert.deepEqual(widgets.at(-1), ["ALLOW action", "OK    rules"], "a clean write is judged and folds to its chip per verdict");
 
     // Path scoping: docs get only the unscoped rule; an excluded file is never sent.
     requests.length = 0;
@@ -885,9 +902,11 @@ test("rules: a write in a project with pi-warden.md gets its own request beside 
     await runCommand("status");
     assert.match(notices.at(-1)!.text, /Rules: none found\./);
 
-    // Without consent nothing is sent, and the sensitive-path note still works.
+    // Without consent nothing is sent, and the sensitive-path note still works. A new prompt refills the steer budget:
+    // the writes above spent this run's three notices.
     await rm(configPath(), { force: true });
     await writeFile(join(temporary, ".pi", "pi-warden.json"), JSON.stringify({ rules: { sensitivePaths: { "**/permissions*": "Ask for a security review" } } }));
+    await newPrompt("add the permissions helper");
     requests.length = 0; networkCalls = 0;
     await toolCall("write", { path: join(temporary, "src", "auth", "permissions.ts"), content: "export const can = () => true;" });
     assert.equal(networkCalls, 0);
@@ -908,14 +927,14 @@ test("prose: the final reply is scored against the audience and the agent is nud
   assert.deepEqual(Object.keys(requests.at(-1)!.questions).sort(), ["cliches", "jargon", "wordy"]);
   assert.equal(requests.at(-1)!.state.audience, "a software developer who knows this codebase and its tools");
   assert.equal(sentMessages.length, 0, "one reply is not a trend");
-  assert.match(widgets.at(-1)!.at(-1)!, /warden · prose · wordy 0\.90 · clichés 0\.95 · jargon 0\.10 · cliches, wordy$/, "strongest symptom first");
+  assert.match(widgets.at(-1)!.at(-1)!, /^prose\s+wordy 0\.90 · clichés 0\.95 · jargon 0\.10 · cliches, wordy$/, "strongest symptom first");
 
   await newPrompt("and the fix?");
   await agentEnd(longReply);
   assert.equal(sentMessages.length, 1, "two of the last three replies: nudge");
   assert.equal(sentMessages[0]!.options?.deliverAs, "nextTurn");
   assert.match(sentMessages[0]!.message.content, /longer than the content needs[\s\S]*assistant clichés[\s\S]*From the next reply on, lead with the answer/);
-  assert.match(widgets.at(-1)!.at(-1)!, /nudged$/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^NUDGED\s+prose\s+wordy 0\.90/, "the nudge is a warning: prose keeps its own line");
   assert.match(notices.at(-1)!.text, /warden · prose: wordy, cliches in 2 of the last 3 replies/);
 
   await newPrompt("ok");
@@ -942,7 +961,7 @@ test("stuck detection: exact repeats are caught offline, varied failures ask Jev
   assert.equal(networkCalls, 0, "exact repeats need no network");
   assert.equal(sentMessages.length, 1);
   assert.match(sentMessages[0]!.message.content, /the same call failed 3 times with the same output\. Stop retrying/);
-  assert.match(widgets.at(-1)!.at(-1)!, /warden · stuck · 3 failures · exact repeat · stuck/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^STUCK\s+stuck\s+3 failures · exact repeat$/);
   assert.match(notices.at(-1)!.text, /warden · stuck: .* \(agent nudged\)/);
 
   await newPrompt("make the tests pass, try harder");
@@ -988,7 +1007,7 @@ test("runaway guard: a reply that repeats its block is aborted mid-stream, recov
   await streamReply(loop.repeat(30));
   assert.equal(aborts.length, 1, "the run is aborted before the loop finishes");
   assert.equal(networkCalls, 0, "code only: nothing is sent to TypeSafe");
-  assert.match(widgets.at(-1)!.at(-1)!, /warden · runaway · text · \d+× repeated · \d+ chars · block · stopped, recovering/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^STOPPED, RECOVERING\s+runaway\s+text · \d+× repeated · \d+ chars · block$/);
   assert.match(notices.at(-1)!.text, /warden · runaway: the same text block repeated \d+ times .* run stopped \(agent gets one follow-up turn\)/);
   assert.equal(notices.at(-1)!.level, "error");
   assert.equal(sentMessages.length, 0, "the follow-up waits for agent_end so Pi can restore queued user messages first");
@@ -1003,7 +1022,7 @@ test("runaway guard: a reply that repeats its block is aborted mid-stream, recov
   abortsBefore = 1;
   await streamReply(loop.repeat(30));
   assert.equal(aborts.length, 2);
-  assert.match(widgets.at(-1)!.at(-1)!, /runaway · text .* stopped$/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^STOPPED\s+runaway\s+text · \d+× repeated · \d+ chars · block$/, "the second stop does not recover, and the chip says only stopped");
   assert.match(notices.at(-1)!.text, /not restarted: second time for this prompt/);
   await fire("agent_end", { messages: [{ role: "assistant", content: [{ type: "text", text: loop.repeat(6) }], stopReason: "aborted" }] }, ctx);
   assert.equal(sentMessages.length, 2);
@@ -1018,7 +1037,7 @@ test("runaway guard: a reply that repeats its block is aborted mid-stream, recov
   assert.equal(aborts.length, 2, "distinct paragraphs are not a runaway");
   await streamReply(loop.repeat(30));
   assert.equal(aborts.length, 3);
-  assert.match(widgets.at(-1)!.at(-1)!, /stopped, recovering$/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^STOPPED, RECOVERING\s+runaway\s/, "a new prompt makes recovery available again");
   await fire("agent_end", { messages: [{ role: "assistant", content: [{ type: "text", text: loop }], stopReason: "aborted" }] }, ctx);
   assert.equal(sentMessages.length, 3);
   assert.deepEqual(sentMessages[2]!.options, { deliverAs: "followUp", triggerTurn: true });
@@ -1030,14 +1049,14 @@ test("runaway guard: a reply that repeats its block is aborted mid-stream, recov
   assert.equal(aborts.length, 3, "8 repeats in thinking is drafting, not a runaway");
   await streamReply(loop.repeat(30), "thinking");
   assert.equal(aborts.length, 4);
-  assert.match(widgets.at(-1)!.at(-1)!, /runaway · thinking · \d+× repeated/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^STOPPED, RECOVERING\s+runaway\s+thinking · \d+× repeated/);
   await fire("agent_end", { messages: [], stopReason: "aborted" }, ctx);
   abortsBefore = 4;
   await writeFile(configPath(), JSON.stringify({ runaway: { recover: false } }));
   await newPrompt("merge again", ctx);
   await streamReply(loop.repeat(30));
   assert.equal(aborts.length, 5);
-  assert.match(widgets.at(-1)!.at(-1)!, /stopped$/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^STOPPED\s+runaway\s+text · \d+× repeated/, "recovery is off: the chip says stopped, not stopped, recovering");
   await fire("agent_end", { messages: [] }, ctx);
   assert.deepEqual(sentMessages.at(-1)!.options, { triggerTurn: false });
   abortsBefore = 5;
@@ -1147,7 +1166,7 @@ test("done-check: an unverified completion claim after file changes gets one fol
   assert.equal(sentMessages.length, 1);
   assert.match(sentMessages[0]!.message.content, /reports completion \(0\.92\) after 1 file change with no test, build, or lint run/);
   assert.deepEqual(sentMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
-  assert.match(widgets.at(-1)!.at(-1)!, /warden · done-check · 1 changes · 0\/0 checks passed · claims done 0\.92 .* unverified/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^UNVERIFIED\s+done\s+done-check · 1 changes · 0\/0 checks passed · claims done 0\.92 /);
 
   await fire("agent_start", {});
   await toolResult("edit", { path: "src/parser.ts", edits: [] }, "ok", false);
@@ -1206,7 +1225,7 @@ test("done-check: an edit after a passing run makes the run unverified again", a
   assert.match(sentMessages[0]!.message.content, /after 2 file changes with no test, build, or lint run since the last change/);
   assert.match(sentMessages[0]!.message.content, /Run the project's tests, build, or lint/);
   assert.deepEqual(sentMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
-  assert.match(widgets.at(-1)!.at(-1)!, /warden · done-check · 2 changes · 0\/0 checks passed · claims done 0\.90 .* unverified/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^UNVERIFIED\s+done\s+done-check · 2 changes · 0\/0 checks passed · claims done 0\.90 /);
 });
 
 test("the request carries the latest user prompt and a redacted action summary", async () => {
@@ -1230,7 +1249,7 @@ test("TypeSafe failures fail open with a warning and never leak the upstream bod
   assert.equal(notices.length, 1);
   assert.match(notices[0]!.text, /^warden: /);
   assert.ok(!notices[0]!.text.includes("upstream body"), "upstream error bodies stay out of the UI");
-  assert.deepEqual(widgets.at(-1), ["warden · bash · typesafe error · allow"]);
+  assert.deepEqual(widgets.at(-1), ["ALLOW action bash · typesafe error"], "the fail-open flag keeps the line: a degraded judgment is never shown as a plain OK");
 });
 
 test("regression: a budget error from an end-of-turn guard stops every later request, not only the action guard's", async () => {
@@ -1242,13 +1261,13 @@ test("regression: a budget error from an end-of-turn guard stops every later req
   await agentEnd("Great question! Let me walk you through it. ".repeat(6));
   assert.equal(networkCalls, 1);
   assert.match(notices.at(-1)!.text, /Pattern checks continue without TypeSafe for the rest of this session/, "the prose check's budget code reaches the session state");
-  assert.match(widgets.at(-1)!.at(-1)!, /warden · prose · typesafe error/);
+  assert.match(widgets.at(-1)!.at(-1)!, /^OK\s+prose\s+typesafe error$/, "the fail-open flag keeps the line");
 
   notices.length = 0;
   assert.equal(await toolCall("bash", { command: "npm run lint" }), undefined);
   assert.equal(networkCalls, 1);
   assert.deepEqual(notices, [], "no further TypeSafe error is reported");
-  assert.equal(widgets.at(-1)![0], "warden · bash · allow", "pattern checks only, no error flag");
+  assert.equal(widgets.at(-1)![0], "ALLOW action", "pattern checks only, no error flag, so the quiet allow folds");
 });
 
 test("PI_WARDEN_ENABLED=1 grants consent for headless runs", async () => {
@@ -1473,7 +1492,7 @@ test("widget templates come from config and unknown or empty tokens drop their s
   nextAnswers = { irreversible: 0.33, off_task: 0.1, scope: "expected_step" };
   await toolCall("bash", { command: "npm test" });
   assert.equal(widgetPlacement, "belowEditor");
-  assert.match(widgets.at(-1)![0]!, /^\d{2}:\d{2}:\d{2} bash → allow · irr 0\.33$/);
+  assert.match(widgets.at(-1)![0]!, /^action\s+\d{2}:\d{2}:\d{2} bash → allow · irr 0\.33$/, "a template that keeps the level mid-line has no verdict to lead with, so the guard leads");
   widgetComponent!.handleMouse!({ type: "click", button: "left", x: 1, y: 0 });
   assert.equal((customCalls.at(-1)!.options?.overlayOptions as Record<string, unknown>).width, 60, "panelWidth from config");
   openPanels.at(-1)!.handleInput("q");
@@ -1482,4 +1501,144 @@ test("widget templates come from config and unknown or empty tokens drop their s
   await writeFile(configPath(), JSON.stringify({ widget: { enabled: false } }));
   await toolCall("bash", { command: "rm -rf dist" });
   assert.equal(widgets.at(-1), undefined, "widget disabled clears the line");
+});
+
+test("a repeated notice is recorded only, not re-sent as another steer", async () => {
+  await grantConsent();
+  const first = await toolResult("read", {}, "TOKEN=ghp_Qk7mZ2pR9vT4xL8nW3sY6bD1cF5hJ0aM", false) as { content: Array<{ text: string }> };
+  assert.match(first.content[0]!.text, /do not echo or commit/);
+  const second = await toolResult("read", {}, "AWS_ACCESS_KEY_ID=AKIA3M7QZ2PRT9LVXW8Y", false) as { content: Array<{ text: string }> };
+  assert.match(second.content[0]!.text, /do not echo or commit/, "the banner still reaches the user through the tool result");
+  assert.equal(sentMessages.length, 1, "the second identical notice costs no accounting turn");
+  await runCommand("trace", context({ hasUI: false }));
+  assert.match(sentMessages.at(-1)!.message.content, /steer recorded, not delivered/, "the trace says the repeat was recorded, not delivered");
+});
+
+test("the per-run steer budget records further non-critical notices instead of delivering them", async () => {
+  await writeFile(configPath(), JSON.stringify({ typesafe: true, steerBudget: 1, rules: { sensitivePaths: { "tests/secrets/**": "never commit fixtures" } } }));
+  nextAnswers = { irreversible: 0.1, off_task: 0.1, scope: "expected_step" };
+  await toolCall("edit", { path: "tests/secrets/a.ts", edits: [{ oldText: "old", newText: "new" }] });
+  assert.equal(sentMessages.length, 1, "the first notice of the run is delivered");
+  const secret = await toolResult("read", {}, "TOKEN=ghp_Qk7mZ2pR9vT4xL8nW3sY6bD1cF5hJ0aM", false) as { content: Array<{ text: string }> };
+  assert.match(secret.content[0]!.text, /do not echo or commit/, "the banner still reaches the user through the tool result");
+  assert.equal(sentMessages.length, 1, "the second notice of the run costs no accounting turn");
+  await runCommand("trace", context({ hasUI: false }));
+  assert.match(sentMessages.at(-1)!.message.content, /steer recorded, not delivered/, "the trace says the over-budget notice was recorded, not delivered");
+  // A different secret value: the per-value dedup would silence a repeat of the same value.
+  sentMessages.length = 0;
+  await newPrompt("Now review the fixtures");
+  await toolResult("read", {}, "GITHUB_TOKEN=ghp_Dk7mZ2pR9vT4xL8nW3sY6bD1cF5hJ0aX", false);
+  assert.equal(sentMessages.length, 1, "the first notice of the next run is delivered again");
+});
+
+test("critical guards deliver past the spent steer budget", async () => {
+  await writeFile(configPath(), JSON.stringify({ typesafe: true, steerBudget: 1 }));
+  await toolResult("read", {}, "TOKEN=ghp_Qk7mZ2pR9vT4xL8nW3sY6bD1cF5hJ0aM", false);
+  assert.equal(sentMessages.length, 1, "the budget is spent by the security notice");
+  await toolResult("edit", { path: "src/a.ts", edits: [{ oldText: "a", newText: "b" }] }, "changed", false);
+  nextAnswers = { claims_done: 0.95, claims_verified: 0.1, verification_applies: 0.95, outcome: "complete" };
+  await agentEnd("All done, the feature is complete and shipped.");
+  assert.equal(sentMessages.length, 2, "the done-check follow-up is critical and delivers anyway");
+  assert.match(sentMessages.at(-1)!.message.content, /reports completion \(0\.95\)/, "the delivered follow-up asks the agent to verify before claiming done");
+});
+
+test("a final reply that restates this run's earlier reply is counted, not steered", async () => {
+  await grantConsent();
+  const done = "CON-375 done: draft PR 2688 is pushed with code, tests and screenshots, and Linear is In Review. Worktree millia-con375 awaits review.";
+  const again = "CON-375 is complete: the draft PR 2688 is pushed together with code, tests and screenshots, and Linear sits In Review. The worktree millia-con375 now awaits review.";
+  await agentEnd(done);
+  await agentEnd(again);
+  await runCommand("status", context({ hasUI: false }));
+  assert.match(sentMessages.at(-1)!.message.content, /1 restatements/, "the status counts the restatement");
+  await runCommand("trace", context({ hasUI: false }));
+  assert.match(sentMessages.at(-1)!.message.content, /restated \d+% of \d+ sentences · recorded only/, "the trace records the restatement without steering another turn");
+  // A fresh prompt clears the window: answering the user is never a restatement.
+  await newPrompt("Squash and merge it");
+  await agentEnd(done);
+  await runCommand("status", context({ hasUI: false }));
+  assert.match(sentMessages.at(-1)!.message.content, /1 restatements/, "the same answer to a new prompt does not count again");
+});
+
+test("the backend option is forwarded only when it is not the default, and names its own destination", async () => {
+  const { BACKENDS, disclosure, disclosureFor, judgeOptions } = await import("../src/extension.js");
+  const { defaultConfig } = await import("../src/config.js");
+  const base = defaultConfig();
+
+  assert.deepEqual(judgeOptions(base), { maxRequests: base.maxRequests, timeoutMs: base.timeoutMs },
+    "a session that never touched the setting must build the client exactly as it did before this option existed");
+  assert.deepEqual(judgeOptions({ ...base, typesafeBackend: "openrouter" }),
+    { maxRequests: base.maxRequests, timeoutMs: base.timeoutMs, backend: "openrouter" });
+
+  // A hand-written copy of the whole consent text, NOT derived from the constant under test, so a mutation to any
+  // character of it — destination host or prose — breaks this pin. `disclosureFor("typesafe") === disclosure` would be
+  // tautological: it compares the constant with itself and cannot fail on a text change.
+  const DEFAULT_DISCLOSURE =
+    "With TypeSafe judgments enabled, pi-warden sends to api.typesafe.ai: your latest request and up to eight redacted prior user/assistant text messages for task context, plus a redacted, truncated summary of each guarded bash, write, or edit call before it runs, with the agent's own words from the message that makes the call (its stated plan); for a write or edit in a project with a rules file (pi-warden.md, the configured files, or README/CLAUDE/AGENTS as fallback), a larger redacted sample of the written content with the current file around each edit and the rule text; the last few tool calls and output tails when the agent keeps failing; the agent's final message when it reports completion without running checks; redacted tool-output samples for security and context saving (retention and output format); a redacted sample of an async subagent report that names a failure, a stop, or a question, with your latest request, when warden decides whether that report should wake the agent; and, on the first guarded call after your reply, the redacted summaries of the calls allowed in the previous turn, so Jev can say whether your reply regrets one of them. Compression and duplicate notes store an exact, owner-only copy in a temporary file on this machine; the hold feedback log stores tool names, pattern ids, scores, and outcomes (never commands) in an owner-only file under Pi's agent directory. Requests may incur charges. Secret redaction is best-effort. Results are model judgments, not proof or authorization; offline pattern checks stay active either way.";
+  assert.equal(disclosure, DEFAULT_DISCLOSURE,
+    "the consent text is load-bearing; changing any of it must update this hand-written pin on purpose");
+  assert.equal(disclosureFor("typesafe"), DEFAULT_DISCLOSURE, "the default backend shows it unchanged");
+  const redirected = disclosureFor("openrouter");
+  assert.equal(redirected, DEFAULT_DISCLOSURE.replaceAll(BACKENDS.typesafe.host, BACKENDS.openrouter.host),
+    "the redirected text is the default text with only the destination host swapped — prose included");
+  assert.ok(!redirected.includes(BACKENDS.typesafe.host), "and it must not still claim the default destination");
+});
+
+test("the status line adds a backend segment only for a non-default backend; the default line is unchanged", async () => {
+  await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true }));
+  await runCommand("status");
+  assert.ok(!/backend /.test(notices.at(-1)!.text), "a user who never set a backend sees the same status as before this option");
+
+  process.env.TYPESAFE_OPENROUTER_API_KEY = "offline-backend-key";
+  try {
+    await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true, typesafeBackend: "openrouter" }));
+    await runCommand("status");
+    assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "a redirected session is told so");
+  } finally { delete process.env.TYPESAFE_OPENROUTER_API_KEY; }
+});
+
+test("the credential that counts is the one the chosen backend uses, not the TypeSafe keystore", async () => {
+  const { keyAvailable, backendSupported } = await import("../src/extension.js");
+  assert.equal(keyAvailable("typesafe", {}, () => true), true);
+  assert.equal(keyAvailable("typesafe", {}, () => false), false, "the default backend still needs the keystore");
+  assert.equal(keyAvailable("openrouter", {}, () => true), false,
+    "a usable TypeSafe keystore says nothing about another backend");
+  assert.equal(keyAvailable("openrouter", { TYPESAFE_OPENROUTER_API_KEY: " k " }, () => false), true,
+    "and its own variable is enough without any TypeSafe key");
+  assert.equal(keyAvailable("openrouter", { TYPESAFE_OPENROUTER_API_KEY: "  " }, () => false), false, "blank is not a key");
+
+  assert.equal(backendSupported("typesafe", undefined), true, "the default backend needs no registry to exist");
+  assert.equal(backendSupported("openrouter", undefined), false,
+    "a pi-typesafe that predates the option would ignore it and reach the default destination instead");
+  assert.equal(backendSupported("openrouter", { openrouter: { baseURL: "https://openrouter.ai" } }), true);
+});
+
+test("a backend this pi-typesafe cannot reach refuses to judge instead of quietly using the default destination", async () => {
+  const savedBackendKey = process.env.TYPESAFE_OPENROUTER_API_KEY;
+  const savedKey = process.env.TYPESAFE_API_KEY;
+  // The exact motivating user: waitlisted for TypeSafe (no TypeSafe key at all), with an OpenRouter key of their own.
+  delete process.env.TYPESAFE_API_KEY;
+  process.env.TYPESAFE_OPENROUTER_API_KEY = "offline-backend-key";
+  await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true, typesafeBackend: "openrouter" }));
+  try {
+    // Measured against pi-typesafe@0.5.0 from the registry: createTypeSafe({ backend: "openrouter" }) ignores the option
+    // and, with no TypeSafe key, THROWS "No TypeSafe API key". That throw is on the tool_call path, which has no try/catch,
+    // so it would tear down the hook — a destructive command that the offline pattern check would otherwise hold escapes
+    // instead. The support gate returns before createTypeSafe is ever built, so the call must simply not throw here.
+    const held = await toolCall("bash", { command: "rm -rf /var/data" });
+    assert.equal(networkCalls, 0, "no request may leave for a destination the installed client cannot honour");
+    assert.ok(held?.block, "and the offline pattern check still guards the call — fail open, never crash the hook");
+    const refusals = () => notices.filter(notice => /does not implement the "openrouter" backend, so judgments are off/.test(notice.text)).length;
+    assert.equal(refusals(), 1, "the refusal is said out loud once, with the way out");
+    // A second guarded call in the same session must not repeat it — a per-turn notice is noise the user learns to ignore.
+    await toolCall("bash", { command: "rm -rf /var/logs" });
+    assert.equal(refusals(), 1, "and not once per judgment: the warning is keyed on the backend value, not fired every call");
+
+    await runCommand("status");
+    assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "status names the configured backend");
+  } finally {
+    if (savedBackendKey === undefined) delete process.env.TYPESAFE_OPENROUTER_API_KEY;
+    else process.env.TYPESAFE_OPENROUTER_API_KEY = savedBackendKey;
+    if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY;
+    else process.env.TYPESAFE_API_KEY = savedKey;
+  }
 });

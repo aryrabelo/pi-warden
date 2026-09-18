@@ -4,7 +4,9 @@ What pi-warden sends to TypeSafe, what it keeps on this machine, and what it nev
 
 ## What is sent, per guard
 
-With consent, requests go to `https://api.typesafe.ai` only.
+With consent, requests go to one destination: `https://api.typesafe.ai` by default, or `https://openrouter.ai` when `typesafeBackend` is `openrouter` (user config only; a project file cannot redirect them). The request body and the answers are the same either way, and the `/warden status` line and the `/warden enable` notice always name the destination in force. The default backend authenticates with the TypeSafe key; `openrouter` reads `TYPESAFE_OPENROUTER_API_KEY` and never touches the TypeSafe keystore.
+
+A configured destination the installed pi-typesafe cannot reach sends nothing at all: that client would ignore the setting and post to `https://api.typesafe.ai`, so pi-warden turns judgments off and says so instead of using a destination you did not choose. No request ever goes somewhere the consent notice did not name.
 
 | Guard | Sent |
 | --- | --- |
