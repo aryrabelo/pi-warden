@@ -37,13 +37,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # continue-on-error: veredito probabilistico NUNCA reprova PR sozinho.
-      # exit 3 (humano) e exit 4 (fail-open / controle fora da banda) sobem intactos
-      # como outputs, mas o job segue verde -- quem bloqueia merge e gate deterministico.
+      # VENDORIZADA, e a razao e' MEDIDA, nao preferencia. Tentei antes
+      # `uses: aryrabelo/jev-acceptance-action@main` e a corrida 35383308078 morreu no
+      # "Set up job" com a linha literal:
+      #   Unable to resolve action `aryrabelo/jev-acceptance-action`, not found
+      # mesmo com {"access_level":"user"} aberto. O access_level compartilha a action
+      # com outros repos PRIVADOS do mesmo dono; repo PUBLICO nao alcanca action
+      # privada, por desenho. E como repo privado desta conta nao pega runner
+      # hospedado (budget) nem tem self-hosted registrado, as duas condicoes sao
+      # mutuamente exclusivas hoje -- por isso a prova ao vivo roda com a action
+      # copiada pra dentro deste repo.
       - id: jev
         continue-on-error: true
-        uses: aryrabelo/jev-acceptance-action@main
+        uses: ./.github/actions/jev
         with:
           pr: ${{ inputs.pr || github.event.pull_request.number }}
           openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}

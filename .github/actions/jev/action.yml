@@ -1,0 +1,161 @@
+name: "Jev acceptance check"
+description: >-
+  Pergunta ao Jev, em UMA requisição, se o PR atende o aceite da issue que fecha,
+  lida junto com a cadeia de ancestrais até o épico raiz e com as issues seguintes.
+  Veredito probabilístico: roteia e relata, nunca bloqueia merge sozinho.
+author: aryrabelo
+
+inputs:
+  pr:
+    description: "Número do PR a julgar."
+    required: true
+  repo:
+    description: "owner/repo do PR."
+    required: false
+    default: ${{ github.repository }}
+  openrouter_api_key:
+    description: "Chave que fala com o Jev. NUNCA é ecoada."
+    required: true
+  github_token:
+    description: "Token usado pelo gh (precisa de pull-requests: write e issues: write se routing.labels for true)."
+    required: false
+    default: ${{ github.token }}
+  config_dir:
+    description: "Diretório do contrato de aceite."
+    required: false
+    default: ".jev"
+  timeout:
+    description: "Timeout da requisição ao Jev, em segundos."
+    required: false
+    default: "90"
+
+outputs:
+  json:
+    description: "A linha JSON canônica do contrato (vazia quando o repo não opta)."
+    value: ${{ steps.jev.outputs.json }}
+  human:
+    description: "true quando o veredito pede revisão humana."
+    value: ${{ steps.jev.outputs.human }}
+  exit_code:
+    description: "0 veredito / 2 config inválida / 3 pede humano / 4 fail-open."
+    value: ${{ steps.jev.outputs.exit_code }}
+  fail_open_triggered:
+    description: "true quando não houve veredito e o step deixou passar."
+    value: ${{ steps.jev.outputs.fail_open_triggered }}
+  control_status:
+    description: >-
+      Estado do controle calibrado desta corrida: ok | fora_da_banda | ausente | erro.
+      `ausente` = o repo não declarou `control:` (a corrida rodou SEM controle).
+      `erro` = a linha JSON não pôde ser lida (vazia, sem o campo, ou fora do
+      contrato) — inclui o no-op de repo que não opta. Falha de leitura NUNCA vira `ok`.
+    value: ${{ steps.jev.outputs.control_status }}
+
+runs:
+  using: composite
+  steps:
+    - id: jev
+      shell: bash
+      env:
+        JEV_PR: ${{ inputs.pr }}
+        JEV_REPO: ${{ inputs.repo }}
+        JEV_CONFIG_DIR: ${{ inputs.config_dir }}
+        JEV_TIMEOUT: ${{ inputs.timeout }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        set -uo pipefail
+        out="$(mktemp)"
+        # O exit code é do contrato (0/2/3/4) e sobe intacto: quem decide se o job
+        # falha é o workflow, com continue-on-error.
+        "$GITHUB_ACTION_PATH/scripts/jev-accept.sh" run --repo "$JEV_REPO" --pr "$JEV_PR" | tee "$out"
+        rc="${PIPESTATUS[0]}"
+
+        json="$(cat "$out")"
+
+        # O EXIT CODE e' a fonte de verdade destas duas saidas, nao o jq.
+        # Contrato (scripts/jev-accept.sh:10): 0 veredito sem humano | 2 config
+        # invalida | 3 roteado pro humano | 4 falha de ferramenta/cota (fail-open,
+        # que tambem pede humano).
+        #
+        # Ler isto com jq reabria, um andar acima, o buraco que o script acabou de
+        # fechar: `jq ... || printf false` transforma jq AUSENTE em
+        # `fail_open_triggered=false`, ou seja falha de ferramenta chegando ao
+        # workflow como corrida limpa. Medido 2026-09-18 com PATH sem jq (fakes de
+        # gh/curl presentes, so' o jq fora): o script emite
+        # `"fail_open_triggered":true` e este passo exportava `false`. Exit code
+        # nao depende de ferramenta nenhuma estar instalada -- e o runner
+        # self-hosted da frota tem `.path` congelado no `svc.sh install`, entao jq
+        # ausente e' condicao esperada, nao exotica.
+        case "$rc" in
+          3) human=true;  fail_open=false ;;
+          4) human=true;  fail_open=true  ;;
+          *) human=false; fail_open=false ;;
+        esac
+
+        # ----------------------------------------------------- controle calibrado
+        # `control_status` NAO e' derivavel do exit code: o 4 tambem cobre 403 de
+        # cota e ferramenta ausente, e o 0 nao diz se havia controle declarado.
+        # Entao esta saida sai da LINHA JSON -- lida com regex de bash puro, sem jq,
+        # pelo mesmo motivo medido acima (runner self-hosted com `.path` congelado
+        # pode rodar sem o jq do nix). O fallback de leitura e' `erro`, NUNCA `ok`:
+        # linha vazia, linha sem o campo `control`, status desconhecido e shape fora
+        # do contrato caem todos em `erro`, porque "nao consegui ler o controle" nao
+        # e' "o controle passou".
+        control_status=erro
+        re_control='"control"[[:space:]]*:[[:space:]]*\{[^{}]*"status"[[:space:]]*:[[:space:]]*"([a-z_]+)"'
+        if [[ "$json" =~ $re_control ]]; then
+          case "${BASH_REMATCH[1]}" in
+            ok|fora_da_banda|ausente|erro) control_status="${BASH_REMATCH[1]}" ;;
+          esac
+        fi
+
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          re_name='"name"[[:space:]]*:[[:space:]]*"([^"]*)"'
+          re_question='"question"[[:space:]]*:[[:space:]]*"([^"]*)"'
+          re_value='"value"[[:space:]]*:[[:space:]]*([0-9eE.+-]+)'
+          re_band='"band"[[:space:]]*:[[:space:]]*(\{[^{}]*\})'
+          {
+            printf '\n### Controle calibrado: `%s`\n\n' "$control_status"
+            case "$control_status" in
+              fora_da_banda)
+                printf 'O veredito deste PR foi **DESCARTADO**: o juiz errou um caso de resposta conhecida, julgado nesta mesma corrida.\n\n'
+                cases="${json#*\"cases\":[}"
+                if [ "$cases" != "$json" ]; then
+                  cases="${cases%%]*}"
+                  while IFS= read -r c; do
+                    case "$c" in *'"passed":false'*|*'"passed": false'*) ;; *) continue ;; esac
+                    name='(sem nome)'; question='(sem pergunta)'; value='?'; band='?'
+                    [[ "$c" =~ $re_name ]] && name="${BASH_REMATCH[1]}"
+                    [[ "$c" =~ $re_question ]] && question="${BASH_REMATCH[1]}"
+                    [[ "$c" =~ $re_value ]] && value="${BASH_REMATCH[1]}"
+                    [[ "$c" =~ $re_band ]] && band="${BASH_REMATCH[1]}"
+                    printf -- '- controle `%s`: `%s` respondeu **%s**, fora da banda `%s`\n' \
+                      "$name" "$question" "$value" "$band"
+                  done <<<"${cases//\},\{/$'\n'}"
+                fi
+                printf '\nControle fora da banda nunca aprova e nunca reprova o PR: chama humano (exit 4).\n'
+                ;;
+              ausente)
+                printf 'Esta corrida rodou **SEM controle**: nenhum `control:` declarado em `%s/acceptance.yml`, então nada aqui diz se o juiz está calibrado ou se ele responderia o mesmo para qualquer PR.\n' "$JEV_CONFIG_DIR"
+                ;;
+              ok)
+                printf 'Os casos de resposta conhecida passaram nesta corrida: o veredito acima veio de um juiz calibrado nela mesma.\n'
+                ;;
+              *)
+                printf 'Não foi possível **ler** o controle na linha JSON desta corrida (linha vazia, sem o campo `control`, ou fora do contrato). Trate como não auditado: `erro` nunca é `ok`.\n'
+                ;;
+            esac
+          } >>"$GITHUB_STEP_SUMMARY"
+        fi
+        {
+          printf 'json<<JEV_EOF\n%s\nJEV_EOF\n' "$json"
+          printf 'human=%s\n' "$human"
+          printf 'fail_open_triggered=%s\n' "$fail_open"
+          printf 'exit_code=%s\n' "$rc"
+          printf 'control_status=%s\n' "$control_status"
+        } >>"$GITHUB_OUTPUT"
+        exit "$rc"
+
+branding:
+  icon: "check-circle"
+  color: "purple"
