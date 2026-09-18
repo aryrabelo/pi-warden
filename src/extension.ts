@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { MouseRegion } from "@earendil-works/pi-tui";
-import type { KeyId } from "@earendil-works/pi-tui";
+import * as tuiModule from "@earendil-works/pi-tui";
+import type { Component, KeyId, MouseRegionHandler } from "@earendil-works/pi-tui";
 import { authState, createTypeSafe, describeAuth } from "pi-typesafe";
 import type { TypeSafe } from "pi-typesafe";
 import { ensureApiKey } from "pi-typesafe/ui";
@@ -40,6 +40,26 @@ export const disclosure = "With TypeSafe judgments enabled, pi-warden sends to a
 
 const WIDGET = PACKAGE_NAME;
 const CONFIRM_TEXT_LIMIT = 500;
+
+/** The mouse-region component's constructor, as this module uses it. */
+type MouseRegionConstructor = new (child: Component, onMouse: MouseRegionHandler) => Component;
+
+/**
+ * The TUI's optional components, read as namespace properties rather than named imports: a named import of an export
+ * the host bundle lacks fails the module at link time and would take every guard down with it.
+ */
+// The module's own shape, which its published types do not model as optional; nothing external reaches this value.
+const optionalTui = tuiModule as Partial<{ MouseRegion: MouseRegionConstructor }>;
+const MouseRegionComponent = optionalTui.MouseRegion;
+
+/**
+ * The widget, wrapped so a click reaches `onMouse` on a host that has the mouse-region component and left as the plain
+ * body on a host that does not. The constructor is an explicit parameter with no default, so both hosts are reachable
+ * from a test without a module mock and `undefined` cannot quietly mean "use this host's".
+ */
+export function mouseable(body: Component, onMouse: MouseRegionHandler, MouseRegion: MouseRegionConstructor | undefined): Component {
+  return MouseRegion ? new MouseRegion(body, onMouse) : body;
+}
 
 /** Which guard spent the user's attention. The status line reports one count per guard. */
 export type SteerGuard = "action" | "rules" | "security" | "stuck" | "done" | "prose" | "runaway" | "subagent";
@@ -264,12 +284,14 @@ export default function wardenExtension(pi: ExtensionAPI): void {
     lastUi = ctx.ui as unknown as PanelUi;
     if (!config.widget.enabled || widget.size === 0) { ctx.ui.setWidget(WIDGET, undefined); return; }
     const entries = [...widget].map(([guard, line]) => ({ guard, line }));
-    // A custom component so the lines wrap to the pane and a click (fullscreen mode) opens the trace panel.
-    ctx.ui.setWidget(WIDGET, (_tui, theme) => new MouseRegion(statusWidget(entries, theme), event => {
+    // A custom component so the lines wrap to the pane and a click (fullscreen mode) opens the trace panel. A host
+    // whose TUI has no mouse region used to fail the whole extension at load, taking every guard with it, so the
+    // constructor is read off the namespace (absent = undefined, not a link error) and the status lines stand alone.
+    ctx.ui.setWidget(WIDGET, (_tui, theme) => mouseable(statusWidget(entries, theme), event => {
       if (event.type !== "click" || event.button !== "left") return undefined;
       togglePanel(lastUi, config);
       return { handled: true };
-    }), { placement: config.widget.placement });
+    }, MouseRegionComponent), { placement: config.widget.placement });
   };
   const record = (ctx: ExtensionContext | ExtensionCommandContext, config: WardenConfig, guard: GuardName, line: string, details: string[]): TraceEntry => {
     widget.set(guard, line);
