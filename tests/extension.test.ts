@@ -1569,12 +1569,18 @@ test("the backend option is forwarded only when it is not the default, and names
   assert.deepEqual(judgeOptions({ ...base, typesafeBackend: "openrouter" }),
     { maxRequests: base.maxRequests, timeoutMs: base.timeoutMs, backend: "openrouter" });
 
-  assert.equal(disclosureFor("typesafe"), disclosure, "the default consent text is unchanged, character for character");
+  // A hand-written copy of the whole consent text, NOT derived from the constant under test, so a mutation to any
+  // character of it — destination host or prose — breaks this pin. `disclosureFor("typesafe") === disclosure` would be
+  // tautological: it compares the constant with itself and cannot fail on a text change.
+  const DEFAULT_DISCLOSURE =
+    "With TypeSafe judgments enabled, pi-warden sends to api.typesafe.ai: your latest request and up to eight redacted prior user/assistant text messages for task context, plus a redacted, truncated summary of each guarded bash, write, or edit call before it runs, with the agent's own words from the message that makes the call (its stated plan); for a write or edit in a project with a rules file (pi-warden.md, the configured files, or README/CLAUDE/AGENTS as fallback), a larger redacted sample of the written content with the current file around each edit and the rule text; the last few tool calls and output tails when the agent keeps failing; the agent's final message when it reports completion without running checks; redacted tool-output samples for security and context saving (retention and output format); a redacted sample of an async subagent report that names a failure, a stop, or a question, with your latest request, when warden decides whether that report should wake the agent; and, on the first guarded call after your reply, the redacted summaries of the calls allowed in the previous turn, so Jev can say whether your reply regrets one of them. Compression and duplicate notes store an exact, owner-only copy in a temporary file on this machine; the hold feedback log stores tool names, pattern ids, scores, and outcomes (never commands) in an owner-only file under Pi's agent directory. Requests may incur charges. Secret redaction is best-effort. Results are model judgments, not proof or authorization; offline pattern checks stay active either way.";
+  assert.equal(disclosure, DEFAULT_DISCLOSURE,
+    "the consent text is load-bearing; changing any of it must update this hand-written pin on purpose");
+  assert.equal(disclosureFor("typesafe"), DEFAULT_DISCLOSURE, "the default backend shows it unchanged");
   const redirected = disclosureFor("openrouter");
-  assert.ok(redirected.includes(BACKENDS.openrouter.host), "consent must name where the data actually goes");
-  assert.ok(!redirected.includes(BACKENDS.typesafe.host), "and must not still claim the default destination");
-  assert.equal(redirected.length - BACKENDS.openrouter.host.length, disclosure.length - BACKENDS.typesafe.host.length,
-    "only the destination differs; the paragraph itself is one text, not two copies");
+  assert.equal(redirected, DEFAULT_DISCLOSURE.replaceAll(BACKENDS.typesafe.host, BACKENDS.openrouter.host),
+    "the redirected text is the default text with only the destination host swapped — prose included");
+  assert.ok(!redirected.includes(BACKENDS.typesafe.host), "and it must not still claim the default destination");
 });
 
 test("the status line adds a backend segment only for a non-default backend; the default line is unchanged", async () => {
@@ -1621,8 +1627,11 @@ test("a backend this pi-typesafe cannot reach refuses to judge instead of quietl
     const held = await toolCall("bash", { command: "rm -rf /var/data" });
     assert.equal(networkCalls, 0, "no request may leave for a destination the installed client cannot honour");
     assert.ok(held?.block, "and the offline pattern check still guards the call — fail open, never crash the hook");
-    assert.ok(notices.some(notice => /does not implement the "openrouter" backend, so judgments are off/.test(notice.text)),
-      "the refusal is said out loud, once, with the way out");
+    const refusals = () => notices.filter(notice => /does not implement the "openrouter" backend, so judgments are off/.test(notice.text)).length;
+    assert.equal(refusals(), 1, "the refusal is said out loud once, with the way out");
+    // A second guarded call in the same session must not repeat it — a per-turn notice is noise the user learns to ignore.
+    await toolCall("bash", { command: "rm -rf /var/logs" });
+    assert.equal(refusals(), 1, "and not once per judgment: the warning is keyed on the backend value, not fired every call");
 
     await runCommand("status");
     assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "status names the configured backend");
