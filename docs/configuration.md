@@ -62,7 +62,7 @@ User file `~/.pi/agent/pi-warden/config.json` (owner-only). `/warden config` ope
 | `mode` | `steer` (hold goes back to the agent), `confirm` (dialog for you), `advise` (never holds). |
 | `timeoutMs` | Per-request timeout. On timeout the call is allowed with a warning when `action.failOpen` is true. |
 | `maxRequests` | Per-session request budget. When spent, pi-warden says so once and continues with offline checks. |
-| `typesafeBackend` | Which decisions service answers the judgments: `typesafe` (default, `api.typesafe.ai`, TypeSafe key) or `openrouter` (`openrouter.ai`, `TYPESAFE_OPENROUTER_API_KEY`). User file only — a project cannot redirect judgments. Needs a pi-typesafe release that implements the backend; older ones ignore the key and keep using TypeSafe. |
+| `typesafeBackend` | Which decisions service answers the judgments: `typesafe` (default, `api.typesafe.ai`, TypeSafe key) or `openrouter` (`openrouter.ai`, `TYPESAFE_OPENROUTER_API_KEY`). User file only — a project cannot redirect judgments. Needs a pi-typesafe release that implements the backend: an older one would ignore the option and send the request to `api.typesafe.ai` instead, so pi-warden turns judgments **off** and says so once rather than use a destination you did not choose. Offline pattern checks stay active. |
 | `action.tools` | Tools the action guard inspects. Add your own shell-like tools here. |
 | `action.irreversible` | `warn` and `confirm` (hold) thresholds on P(irreversible). |
 | `action.offTask` | `warn` and `steer` thresholds on P(off-task). Off-task never holds. |

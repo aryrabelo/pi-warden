@@ -1577,18 +1577,35 @@ test("the backend option is forwarded only when it is not the default, and names
     "only the destination differs; the paragraph itself is one text, not two copies");
 });
 
-test("a non-default backend judges on its own credential and never on the TypeSafe keystore", async () => {
+test("the credential that counts is the one the chosen backend uses, not the TypeSafe keystore", async () => {
+  const { keyAvailable, backendSupported } = await import("../src/extension.js");
+  assert.equal(keyAvailable("typesafe", {}, () => true), true);
+  assert.equal(keyAvailable("typesafe", {}, () => false), false, "the default backend still needs the keystore");
+  assert.equal(keyAvailable("openrouter", {}, () => true), false,
+    "a usable TypeSafe keystore says nothing about another backend");
+  assert.equal(keyAvailable("openrouter", { TYPESAFE_OPENROUTER_API_KEY: " k " }, () => false), true,
+    "and its own variable is enough without any TypeSafe key");
+  assert.equal(keyAvailable("openrouter", { TYPESAFE_OPENROUTER_API_KEY: "  " }, () => false), false, "blank is not a key");
+
+  assert.equal(backendSupported("typesafe", undefined), true, "the default backend needs no registry to exist");
+  assert.equal(backendSupported("openrouter", undefined), false,
+    "a pi-typesafe that predates the option would ignore it and reach the default destination instead");
+  assert.equal(backendSupported("openrouter", { openrouter: { baseURL: "https://openrouter.ai" } }), true);
+});
+
+test("a backend this pi-typesafe cannot reach refuses to judge instead of quietly using the default destination", async () => {
   const savedBackendKey = process.env.TYPESAFE_OPENROUTER_API_KEY;
-  delete process.env.TYPESAFE_OPENROUTER_API_KEY;
+  // The credential is present on purpose: the only thing standing between this config and a request is the support gate.
+  process.env.TYPESAFE_OPENROUTER_API_KEY = "offline-backend-key";
   await writeFile(configPath(), JSON.stringify({ typesafe: true, notices: true, typesafeBackend: "openrouter" }));
   try {
-    // TYPESAFE_API_KEY is set for this whole suite, so the keystore says "usable" here: a gate that consults it would judge.
+    // Measured against pi-typesafe@0.5.0 from the registry: createTypeSafe({ backend: "openrouter" }) throws nothing and
+    // sends the request to api.typesafe.ai with the TypeSafe key. TYPESAFE_API_KEY is set for this suite, so without the
+    // gate this call would judge — against a destination the config did not choose, while consent named another one.
     assert.equal(await toolCall("bash", { command: "npm test" }), undefined);
-    assert.equal(networkCalls, 0, "without that backend's own credential there is no judge, and no request on the TypeSafe key");
-
-    process.env.TYPESAFE_OPENROUTER_API_KEY = "offline-backend-key";
-    assert.equal(await toolCall("bash", { command: "npm test" }), undefined);
-    assert.equal(networkCalls, 1, "its own credential is what builds the judge");
+    assert.equal(networkCalls, 0, "no request may leave for a destination the installed client cannot honour");
+    assert.ok(notices.some(notice => /does not implement the "openrouter" backend, so judgments are off/.test(notice.text)),
+      "and the refusal is said out loud, once, with the way out");
 
     await runCommand("status");
     assert.match(notices.at(-1)!.text, /backend openrouter \(openrouter\.ai\)/, "status names the destination in force");

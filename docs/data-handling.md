@@ -6,6 +6,8 @@ What pi-warden sends to TypeSafe, what it keeps on this machine, and what it nev
 
 With consent, requests go to one destination: `https://api.typesafe.ai` by default, or `https://openrouter.ai` when `typesafeBackend` is `openrouter` (user config only; a project file cannot redirect them). The request body and the answers are the same either way, and the `/warden status` line and the `/warden enable` notice always name the destination in force. The default backend authenticates with the TypeSafe key; `openrouter` reads `TYPESAFE_OPENROUTER_API_KEY` and never touches the TypeSafe keystore.
 
+A configured destination the installed pi-typesafe cannot reach sends nothing at all: that client would ignore the setting and post to `https://api.typesafe.ai`, so pi-warden turns judgments off and says so instead of using a destination you did not choose. No request ever goes somewhere the consent notice did not name.
+
 | Guard | Sent |
 | --- | --- |
 | **Action** | Your latest prompt (1500 characters), up to eight earlier user and assistant messages (750 redacted characters each), the agent's text from the message that makes the call (500 redacted characters), the tool name, the command (2000 characters) or the file path (relative inside the project, `~`-shortened outside), whether the file exists, a 1500-character head/middle/tail sample of a `write`, the first three edit pairs (400 characters each) of an `edit`. On the first guarded call after your reply, the tool names and commands (300 characters) or paths of up to six calls allowed in the previous turn, for the regret question. |

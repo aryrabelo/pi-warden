@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MouseRegion } from "@earendil-works/pi-tui";
 import type { KeyId } from "@earendil-works/pi-tui";
+import * as typesafeModule from "pi-typesafe";
 import { authState, createTypeSafe, describeAuth } from "pi-typesafe";
 import type { TypeSafe, TypeSafeOptions } from "pi-typesafe";
 import { ensureApiKey } from "pi-typesafe/ui";
@@ -60,12 +61,47 @@ export function disclosureFor(backend: JudgmentBackend): string {
 }
 
 /**
+ * Whether the installed pi-typesafe can actually reach that backend. `table` is its own backend registry, read as a
+ * namespace property so an older module yields `undefined` instead of a link error — the same technique this file uses
+ * for a mismatched config module.
+ *
+ * Why this gate exists at all, measured against `pi-typesafe@0.5.0` from the registry: `createTypeSafe({ backend:
+ * "openrouter", fetch })` threw nothing and produced one request to `https://api.typesafe.ai/v1/systemone` carrying the
+ * TypeSafe key. An ignored option is not harmless here — the request would reach the default destination while the
+ * consent notice named another one. Refusing to judge is the only answer that keeps the disclosure true.
+ */
+export function backendSupported(backend: JudgmentBackend, table: Record<string, unknown> | undefined): boolean {
+  return backend === "typesafe" || table?.[backend] !== undefined;
+}
+
+/** The backend registry of the pi-typesafe actually installed beside this build, or undefined on a release without one. */
+export function installedBackends(): Record<string, unknown> | undefined {
+  return (typesafeModule as { DECISIONS_BACKENDS?: Record<string, unknown> }).DECISIONS_BACKENDS;
+}
+
+/**
+ * Whether the credential that backend actually uses is present. The TypeSafe keystore vouches only for the TypeSafe
+ * backend: a backend with its own `keyEnv` resolves it from the environment inside pi-typesafe and never touches the
+ * keystore, so consulting `authState()` there would refuse a working setup for lacking a key it does not use.
+ *
+ * `keystoreUsable` is a thunk so the keystore is not read at all on a backend that does not use it.
+ */
+export function keyAvailable(
+  backend: JudgmentBackend,
+  env: Record<string, string | undefined>,
+  keystoreUsable: () => boolean,
+): boolean {
+  const keyEnv = BACKENDS[backend].keyEnv;
+  return keyEnv ? (env[keyEnv]?.trim() ?? "") !== "" : keystoreUsable();
+}
+
+/**
  * Config to pi-typesafe client options. `backend` is passed only when it is not the default, so a session that never
  * touched the setting builds the exact same client as before this option existed.
  *
  * The intersection is deliberate: `backend` lands in `TypeSafeOptions` in the pi-typesafe release that implements it, and
- * this compiles against the current 0.5.x too, where an older client simply ignores the extra key (its constructor reads
- * named options and passes nothing else through). Drop the intersection once the dependency floor includes `backend`.
+ * this compiles against the current 0.5.x too. `backendSupported()` is what keeps an older client from being handed an
+ * option it would ignore. Drop the intersection once the dependency floor includes `backend`.
  */
 export function judgeOptions(config: WardenConfig): TypeSafeOptions & { backend?: JudgmentBackend } {
   return {
@@ -266,6 +302,7 @@ export default function wardenExtension(pi: ExtensionAPI): void {
 
   // A partially updated module graph can hand this build a config without the sections it expects; see shape.ts.
   let shapeReported = false;
+  let backendReported = false;
   const configFor = (ctx: ExtensionContext | ExtensionCommandContext): WardenConfig => {
     const { config, missing } = guardCurrentSections(completeConfig(loadConfig({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() })));
     if (missing.length && !shapeReported) {
@@ -274,23 +311,20 @@ export default function wardenExtension(pi: ExtensionAPI): void {
       const text = shapeWarning(missing, (configModule as { CONFIG_SCHEMA?: number }).CONFIG_SCHEMA);
       if (ctx.hasUI) ctx.ui.notify(text, "warning"); else pi.sendMessage({ customType: `${PACKAGE_NAME}-status`, content: text, display: true });
     }
+    if (!backendSupported(config.typesafeBackend, installedBackends()) && !backendReported) {
+      backendReported = true;
+      const text = `pi-warden: this pi-typesafe does not implement the "${config.typesafeBackend}" backend, so judgments are off. Upgrade pi-typesafe or set "typesafeBackend" back to "typesafe" in ${userConfigPath()}. Offline pattern checks stay active.`;
+      if (ctx.hasUI) ctx.ui.notify(text, "warning"); else pi.sendMessage({ customType: `${PACKAGE_NAME}-status`, content: text, display: true });
+    }
     return config;
   };
   const consentGiven = (config: WardenConfig) => config.typesafe || process.env.PI_WARDEN_ENABLED === "1";
   const consentSource = (config: WardenConfig) => config.typesafe ? "/warden enable" : process.env.PI_WARDEN_ENABLED === "1" ? "PI_WARDEN_ENABLED" : undefined;
-  /**
-   * A consent flag is not proof that judgments happen; ask pi-typesafe for the real key state.
-   *
-   * The TypeSafe keystore vouches only for the TypeSafe backend. A backend with its own `keyEnv` resolves its credential
-   * from the environment inside pi-typesafe and never touches the keystore, so blocking on `authState()` there would
-   * refuse a working setup because a key it does not use is missing.
-   */
-  const keyUsable = (config: WardenConfig): boolean => {
-    const keyEnv = BACKENDS[config.typesafeBackend].keyEnv;
-    return keyEnv ? (process.env[keyEnv]?.trim() ?? "") !== "" : authState().usable;
-  };
   const judgeFor = (config: WardenConfig): TypeSafe | undefined => {
-    if (!consentGiven(config) || budgetExhausted || !keyUsable(config)) return undefined;
+    // A consent flag is not proof that judgments happen; the key state and the installed backend decide.
+    if (!consentGiven(config) || budgetExhausted) return undefined;
+    if (!keyAvailable(config.typesafeBackend, process.env, () => authState().usable)) return undefined;
+    if (!backendSupported(config.typesafeBackend, installedBackends())) return undefined;
     return client ??= createTypeSafe(judgeOptions(config));
   };
   const noteError = (ctx: ExtensionContext, message: string, code: string | undefined) => {
