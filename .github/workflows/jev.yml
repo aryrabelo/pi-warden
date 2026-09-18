@@ -1,0 +1,68 @@
+# Prova AO VIVO da jev-acceptance-action. Este workflow existe SO no fork
+# aryrabelo/pi-warden e nunca e proposto ao upstream (DevMortimer/pi-warden).
+#
+# Por que este repo, e nao ceo-pp ou dotfiles-2026 (medido 2026-09-18):
+#   - budget de Actions barra runner HOSPEDADO em repo PRIVADO da conta inteira
+#     ("The job was not started because an Actions budget is preventing further use")
+#   - em repo PUBLICO `ubuntu-latest` roda (medido: itaruby, 28 de 29 jobs com steps>0)
+#   - runner self-hosted e por REPO, e aqui:
+#     gh api repos/aryrabelo/pi-warden/actions/runners --jq .total_count -> 0
+#   Logo: publico + hospedado e o unico caminho que pega runner hoje.
+#
+# O `uses:` abaixo consome uma action de repo PRIVADO sem PAT e sem secret extra.
+# So funciona por causa de:
+#   gh api repos/aryrabelo/jev-acceptance-action/actions/permissions/access
+#   -> {"access_level":"user"}   (aberto em 2026-09-18)
+# Se esta corrida falhar dizendo que a action nao foi encontrada, e ESSA chave.
+name: jev acceptance (prova)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: numero do PR a julgar
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # continue-on-error: veredito probabilistico NUNCA reprova PR sozinho.
+      # exit 3 (humano) e exit 4 (fail-open / controle fora da banda) sobem intactos
+      # como outputs, mas o job segue verde -- quem bloqueia merge e gate deterministico.
+      - id: jev
+        continue-on-error: true
+        uses: aryrabelo/jev-acceptance-action@main
+        with:
+          pr: ${{ inputs.pr || github.event.pull_request.number }}
+          openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+
+      # O secret nunca e ecoado: so os outputs da action.
+      - name: o que o Jev disse
+        run: |
+          set -uo pipefail
+          printf 'exit_code          = %s\n' '${{ steps.jev.outputs.exit_code }}'
+          printf 'human              = %s\n' '${{ steps.jev.outputs.human }}'
+          printf 'fail_open_triggered= %s\n' '${{ steps.jev.outputs.fail_open_triggered }}'
+          printf 'control_status     = %s\n' '${{ steps.jev.outputs.control_status }}'
+          printf '\n--- linha JSON canonica ---\n%s\n' '${{ steps.jev.outputs.json }}'
+
+          # A prova desta corrida e o CONTROLE, nao o veredito: se o juiz errou um
+          # caso de resposta conhecida, o veredito do PR ja foi descartado la dentro.
+          case '${{ steps.jev.outputs.control_status }}' in
+            ok)            echo "::notice::controle calibrado dentro da banda" ;;
+            fora_da_banda) echo "::warning::juiz fora de calibracao - veredito descartado" ;;
+            ausente)       echo "::warning::corrida SEM controle declarado" ;;
+            *)             echo "::warning::controle nao pode ser lido (status=erro)" ;;
+          esac

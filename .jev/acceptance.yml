@@ -1,0 +1,102 @@
+# Contrato de aceite deste repositório, lido pelas duas metades (GitHub Action e CLI
+# local). Uma regra de aceite, um arquivo. Este exemplo está escrito para
+# aryrabelo/dotfiles-2026 (nix-darwin + home-manager).
+#
+# Ausência deste arquivo = no-op silencioso, exit 0, nenhuma requisição gasta.
+version: 1
+
+model: typesafe/jev-1.13
+
+# Tudo é contexto: uma lista achatada de FONTES, montada nesta ordem, rotulada por
+# seção. Nenhuma fonte é privilegiada — tirar `issue.body` daqui faz a seção desaparecer
+# do texto, igual a qualquer outra.
+context:
+  - pr.title
+  - pr.body
+  - pr.commits
+  - pr.diffstat
+  - issue.body # a issue que o PR fecha (closingIssuesReferences)
+  - issue.ancestors # a cadeia pai -> pai -> ... até o épico raiz
+  - issue.next # uma hop: irmãs no mesmo pai + quem depende desta
+
+# Passam CRUAS para o Jev, numa única requisição.
+# noul  -> instructions (string); a resposta é uma PROBABILIDADE 0..1, nunca booleano
+# choice-> instructions (string) + criteria (map rótulo -> rubrica)
+# score -> instructions (string) + criteria (lista, do menor ao maior)
+questions:
+  atende:
+    type: noul
+    instructions: "O PR entrega o que a issue pediu, lida junto com a intenção do épico raiz?"
+  alinhado:
+    type: noul
+    instructions: "A abordagem escolhida é coerente com o plano descrito nos ancestrais, em vez de uma solução local que ignora o desenho?"
+  escopo:
+    type: choice
+    instructions: "Classifique o escopo entregue por este PR em relação ao que ESTA issue pediu."
+    criteria:
+      dentro: "faz exatamente o escopo desta issue"
+      faltou: "deixa de fora parte do que esta issue pedia"
+      extrapolou: "faz trabalho que pertence a uma issue seguinte"
+  atrapalha_proximo:
+    type: noul
+    instructions: "A forma escolhida cria obstáculo para as issues que vêm em seguida (encurrala a próxima etapa)?"
+  risco:
+    type: score
+    instructions: "Quão sensível é a superfície que este PR toca neste repositório de dotfiles (nix-darwin + home-manager), lendo os caminhos do diffstat?"
+    criteria:
+      - "só docs, README ou NEXT_STEPS.md — nada que o switch execute"
+      - "só test/ ou scripts de diagnóstico — não entra no sistema de ninguém"
+      - "home/** ou dotfiles/** — muda a máquina do humano no próximo switch, mas é reversível por rollback do home-manager"
+      - "modules/**, hosts/**, flake.nix ou bin/update-tools — pode quebrar o switch, o bootstrap ou a atualização de ferramentas da frota inteira"
+
+# Polaridade mora AQUI, não em questions (chave extra em questions = 400 no wire).
+routing:
+  human_below: 0.7 # noul comum abaixo disso -> pede humano
+  expect_low: [atrapalha_proximo] # noul ALTO aqui -> pede humano (inverte)
+  expect_label: { escopo: dentro } # choice fora disso -> pede humano
+  labels: true
+  label_human: "jev:humano"
+  label_ok: "jev:ok"
+
+# ------------------------------------------------------------------- controle calibrado
+# Casos de resposta CONHECIDA, julgados na MESMA corrida do PR. Sem isto, `atende: 0.88`
+# não é auditável: nada na corrida diz se o juiz está calibrado ou se ele responderia
+# 0.88 para qualquer coisa. Cada controle é UMA requisição extra (o Jev recebe um `state`
+# por requisição), e é por isso que o teto é 2 — o preço é o motivo do teto.
+#
+# Os DOIS existem porque há dois jeitos opostos de o juiz quebrar, e um controle só pega
+# um deles:
+#   - o NEGATIVO pega o juiz que diz SIM PRA TUDO: se um PR que só mexe no README passar
+#     de 0.89, o `atende: 0.88` do PR real não vale nada;
+#   - o POSITIVO pega o juiz que diz NÃO PRA TUDO (modelo degradado, rota errada, prompt
+#     quebrado): se a entrega exemplar ficar abaixo de 0.89, o "não atende" do PR real é
+#     do juiz, não do PR.
+#
+# Controle reprovado DESCARTA o veredito do PR: exit 4, routing.human=true,
+# fail_open_triggered=true. Nunca aprova, nunca reprova o PR — chama humano.
+#
+# Bandas medidas em 2026-09-18 contra typesafe/jev-1.13 no OpenRouter real, pergunta
+# `atende`, 6 repetições por estado: negativo 0.04 0.05 0.04 0.04 0.04 0.04 (máximo 0.05,
+# jitter 0.01); positivo 0.94 seis vezes (jitter ZERO). ~1.2s e US$ 0.0000143 por
+# requisição — as 12 repetições custaram US$ 0.00017. Jitter medido de 0.01 significa que
+# banda com margem menor que ~0.02 é flaky por construção; não copie banda apertada.
+control:
+  - name: pr_vazio_nao_atende
+    # `state` é texto FIXO no arquivo, nunca derivado do PR em julgamento: é justamente
+    # por ser conhecido que ele mede o juiz.
+    state: "PR: 'docs: corrige typo no README'. Diffstat: 1 1 README.md. A issue que este PR fecha pede: implementar o endpoint POST /aceite e cobri-lo com teste."
+    expect:
+      # NEGATIVO: visto 0.05 contra a banda 0.89 = margem medida de 0.84.
+      atende: { max: 0.89 }
+  - name: pr_exemplar_atende
+    state: "PR: 'feat: endpoint POST /aceite + teste'. Diffstat: 64 0 src/aceite.py / 41 0 tests/test_aceite.py. A issue que este PR fecha pede exatamente: implementar o endpoint POST /aceite e cobri-lo com teste. Suite verde."
+    expect:
+      # POSITIVO, e é o lado APERTADO da assimetria: margem medida de 0.05 (0.94 visto
+      # contra 0.89), contra 0.84 do negativo. É este que derrapa primeiro se o modelo
+      # andar — quando `pr_exemplar_atende` começar a reprovar, foi o juiz que mudou, não
+      # o contrato. A banda dos dois lados não reprova sozinha: com 0.84 e 0.05 de folga,
+      # controle espúrio que jogaria todo PR pro humano está descartado por medição.
+      atende: { min: 0.89 }
+
+# 403 de cota, 429, 5xx, timeout e erro de ferramenta NUNCA reprovam o PR.
+fail_open: true
