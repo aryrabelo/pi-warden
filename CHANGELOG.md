@@ -4,6 +4,48 @@ Notable changes to pi-warden, newest first. Versions follow semver. The publishe
 
 How to keep this current: add the entry in the same pull request as the change, under `Unreleased`. The release commit renames `Unreleased` to the version it ships and adds its own notes. Entries before 0.10.0 are one-line summaries taken from the release commit headers; the detail for those is in `git log`.
 
+## 0.23.0
+
+### Added
+
+- Same-target churn detection (WARDEN-LOOP-2). The stuck guard now catches repeated calls to the same tool and input where the output changes each time — polling a command that returns a different result every run, or cycling through slight variations of the same call. `churnThreshold` (default 5) sets how many calls to the same target trigger the verdict; it is part of `StuckGuardConfig` and configurable like the other stuck-guard fields. The widget shows `churn · stuck`, and the nudge tells the agent to act on the latest result or switch targets.
+
+## 0.22.0
+
+### Changed
+
+- Status line design pass (WARDEN-TUI-1, the widget half). The verdict leads each line as a bold colored chip (`WARN`, `STUCK`, `UNVERIFIED`) instead of hiding at the end; the redundant `warden ·` prefix is gone; the guard follows in muted and the body reads as data (subject in the text tone, labels muted, numeric values bright) — the same palette and vocabulary as the 0.19.0 sidebar pass.
+- Verdicts the guard found nothing in (`ok`, `allow`, `skipped`) fold into one line per verdict, naming the guards that spoke: six guards firing in one turn cost one line, not six, and the folded scores stay in the sidebar. A quiet verdict keeps its own line when the line names a finding or a caveat — `typesafe error`, `user approved`, `slop: <symptom>`, `patterns: <id>` — because folding it would report a verdict the guard did not give. The worst verdict sits last, nearest the editor.
+- The folded line is a display choice, not data loss: `/warden status` prints the raw line per guard under `Last:`, and the trace sidebar keeps every event with its scores. Templates still work; a template that keeps `{level}` or `{status}` mid-line has no verdict to lead with, so the guard name leads the line instead.
+
+## 0.21.0
+
+### Added
+
+- Per-block retention for multi-block tool results (WARDEN-CTX-10). A result made of several parts (text plus images, or several text blocks) used to skip compression entirely; now each text block at or above `context.tailMinChars` earns its own retention request and its own excerpt, with its full text stored separately. Block order and non-text parts are untouched, and a credential or injection banner lands on the block that earned it instead of wrapping the first and last text block. Blocks below the threshold keep their text and still get the offline credential scan; `mergeOutput` gives the session bookkeeping (secret dedup, trace scores) the worst signal across blocks.
+
+## 0.20.0
+
+### The end-of-task restatement loop
+
+A closing run used to collect a notice per guarded call (intent mismatch, credentials, off-task), and each delivered notice cost the agent one more LLM turn, which it filled by restating the final status. Six notices, six "CON-375 is complete" replies. The 0.16 wording caps and the 0.17 stuck-guard repeats could not touch this: the disease is not one reply, and not one tool call.
+
+### Added
+
+- `"steerBudget": 3` (default): steers delivered to the agent per run before further non-critical ones are recorded in the trace only. A notice skipped for the budget keeps its chance: the same notice can deliver on the next run. Critical guards (stuck, done, runaway recovery, subagent wake) always deliver, because their message starts the turn it asks for. `0` disables the budget.
+- Restatement measurement (code only, no request): at the end of a run the final message is compared with the run's earlier final messages (`RestatementWindow`, `restatedShare` in `src/prose.ts`). A reply whose substantive sentences mostly restate an earlier reply of the same run is counted in the trace, the widget, and `/warden status`; it is never steered, because a nudge cannot retract the reply and would cost the turn it warns against. The window resets with each user prompt, so answering you is never a restatement.
+- `/warden status` reports the run's restatement count and the steer budget next to the steer counts.
+
+### Changed
+
+- A repeated steer is no longer re-sent, not even as the one-line reminder: the reminder itself cost the accounting turn it forbade. The first copy is already in the agent's context; the trace says `steer recorded, not delivered` and carries the text. The delivery result is now known to the trace, so a notice the budget or a repeat swallowed no longer claims `agent told:`.
+- `repeatSteer` is removed from the public API (`src/index.ts`); `SteerRepeatWindow` and `steerFingerprint` stay.
+
+### Tests
+
+- `tests/prose.test.ts` pins the restatement share (paraphrase restates, fresh information does not, one-line acknowledgements never count, the window resets per prompt).
+- `tests/extension.test.ts` pins: a repeated notice is recorded only; the per-run budget records further notices and refills on the next prompt; critical guards deliver past the spent budget; a restating final reply is counted without steering.
+
 ## 0.19.0
 
 ### Changed

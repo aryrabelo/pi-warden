@@ -47,6 +47,8 @@ export interface StuckGuardConfig {
   cooldown: number;
   /** P(same strategy) at or above this reports the agent as stuck. */
   sameStrategy: number;
+  /** Calls to the same target (same tool + input key) that trigger churn detection. */
+  churnThreshold: number;
   /** Also steer the agent with a short message, not only the user. */
   nudge: boolean;
 }
@@ -193,6 +195,10 @@ export interface WardenConfig {
   steerVisible: boolean;
   /** Per-call warning notices ("warden · …") in the transcript. Off by default; the widget and trace panel always show them. */
   notices: boolean;
+  /** Steers delivered to the agent per run before further non-critical ones are recorded in the trace only. Every delivered
+   * steer costs at least one LLM turn, and a closing run that collects six notices collects six restatements of the final
+   * status. 0 disables the budget. Critical guards (stuck, done, runaway, subagent wake) always deliver. */
+  steerBudget: number;
 }
 
 export const PACKAGE_NAME = "pi-warden";
@@ -218,7 +224,7 @@ export function defaultConfig(): WardenConfig {
       visibleMismatch: 0.8,
       feedbackLog: true,
     },
-    stuck: { enabled: true, window: 12, minFailures: 3, cooldown: 3, sameStrategy: 0.7, nudge: true },
+    stuck: { enabled: true, window: 12, minFailures: 3, cooldown: 3, sameStrategy: 0.7, churnThreshold: 5, nudge: true },
     done: { enabled: true, claimsDone: 0.7, nudge: true },
     slop: { enabled: true, threshold: 0.7, prose: { enabled: true, audience: "technical", threshold: 0.7, trend: 2, minChars: 200 } },
     security: { enabled: true, threshold: 0.7 },
@@ -230,6 +236,7 @@ export function defaultConfig(): WardenConfig {
     widget: defaultWidgetConfig(),
     steerVisible: false,
     notices: false,
+    steerBudget: 3,
   };
 }
 
@@ -318,6 +325,7 @@ function applyStuck(base: StuckGuardConfig, raw: unknown): StuckGuardConfig {
     minFailures: Math.min(window, positiveInteger(raw.minFailures, base.minFailures)),
     cooldown: positiveInteger(raw.cooldown, base.cooldown),
     sameStrategy: probability(raw.sameStrategy, base.sameStrategy),
+    churnThreshold: Math.min(window, positiveInteger(raw.churnThreshold, base.churnThreshold)),
     nudge: boolean(raw.nudge, base.nudge),
   };
 }
@@ -460,6 +468,7 @@ export function applyUserOverrides(base: WardenConfig, raw: unknown): WardenConf
     widget: applyWidget(base.widget, raw.widget),
     steerVisible: boolean(raw.steerVisible, base.steerVisible),
     notices: boolean(raw.notices, base.notices),
+    steerBudget: typeof raw.steerBudget === "number" && Number.isInteger(raw.steerBudget) && raw.steerBudget >= 0 ? raw.steerBudget : base.steerBudget,
   };
 }
 
