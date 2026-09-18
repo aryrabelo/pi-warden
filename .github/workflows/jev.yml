@@ -47,8 +47,14 @@ jobs:
       # hospedado (budget) nem tem self-hosted registrado, as duas condicoes sao
       # mutuamente exclusivas hoje -- por isso a prova ao vivo roda com a action
       # copiada pra dentro deste repo.
+      # SEM continue-on-error, de proposito. Ele existia porque a action saia com o
+      # exit code do veredito (3 humano, 4 fail-open) e derrubaria o job -- so que
+      # step com conclusion=failure faz o GitHub APAGAR os outputs, entao o consumidor
+      # recebia string vazia exatamente nos casos interessantes (medido: run
+      # 35387669508, controle fora da banda, `exit_code=''`). Hoje a action sempre
+      # termina 0 e o veredito viaja nos outputs; manter o continue-on-error aqui so
+      # voltaria a mascarar quebra de verdade.
       - id: jev
-        continue-on-error: true
         uses: ./.github/actions/jev
         with:
           pr: ${{ inputs.pr || github.event.pull_request.number }}

@@ -37,7 +37,10 @@ outputs:
     description: "true quando o veredito pede revisão humana."
     value: ${{ steps.jev.outputs.human }}
   exit_code:
-    description: "0 veredito / 2 config inválida / 3 pede humano / 4 fail-open."
+    description: >-
+      Código do contrato do script: 0 veredito / 2 config inválida / 3 pede humano /
+      4 fail-open. É uma SAÍDA, não o status do step: o step termina sempre com
+      sucesso (veja `runs:`), e quem decide o que fazer com 2/3/4 é o workflow.
     value: ${{ steps.jev.outputs.exit_code }}
   fail_open_triggered:
     description: "true quando não houve veredito e o step deixou passar."
@@ -65,8 +68,16 @@ runs:
       run: |
         set -uo pipefail
         out="$(mktemp)"
-        # O exit code é do contrato (0/2/3/4) e sobe intacto: quem decide se o job
-        # falha é o workflow, com continue-on-error.
+        # Este passo termina SEMPRE com status 0, e o resultado viaja nos `outputs:`.
+        # Medido em 2026-09-18 (run 35387669508, aryrabelo/pi-warden): com `exit "$rc"`
+        # no fim deste bloco o step vira `conclusion=failure`, e o GitHub NAO propaga
+        # os `outputs:` de uma composite que falhou -- o passo seguinte leu
+        # `exit_code=''`, todos os campos vazios. O contrato antigo ("o exit code sobe
+        # intacto pro job") se autodestruia exatamente nos caminhos que interessam: 3
+        # (humano) e 4 (fail-open/controle) sao os unicos que produzem exit != 0, entao
+        # eram justamente eles que chegavam ao workflow como silencio.
+        # Agora o codigo do contrato sai em `exit_code`, e quem decide o que fazer com
+        # 2/3/4 e' o workflow consumidor.
         "$GITHUB_ACTION_PATH/scripts/jev-accept.sh" run --repo "$JEV_REPO" --pr "$JEV_PR" | tee "$out"
         rc="${PIPESTATUS[0]}"
 
@@ -154,7 +165,11 @@ runs:
           printf 'exit_code=%s\n' "$rc"
           printf 'control_status=%s\n' "$control_status"
         } >>"$GITHUB_OUTPUT"
-        exit "$rc"
+        # Sucesso SEMPRE -- veja o comentario no topo deste `run:`. Sair != 0 aqui
+        # apagaria os outputs que a linha acima acabou de escrever. O unico silencio
+        # que resta e' morte ANTES desta escrita (outputs vazios), e e' isso que a
+        # guarda do workflow consumidor recusa.
+        exit 0
 
 branding:
   icon: "check-circle"

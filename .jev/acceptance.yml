@@ -67,36 +67,65 @@ routing:
 # Os DOIS existem porque há dois jeitos opostos de o juiz quebrar, e um controle só pega
 # um deles:
 #   - o NEGATIVO pega o juiz que diz SIM PRA TUDO: se um PR que só mexe no README passar
-#     de 0.89, o `atende: 0.88` do PR real não vale nada;
+#     de 0.15, o `atende: 0.88` do PR real não vale nada;
 #   - o POSITIVO pega o juiz que diz NÃO PRA TUDO (modelo degradado, rota errada, prompt
-#     quebrado): se a entrega exemplar ficar abaixo de 0.89, o "não atende" do PR real é
+#     quebrado): se a entrega exemplar ficar abaixo de 0.82, o "não atende" do PR real é
 #     do juiz, não do PR.
 #
 # Controle reprovado DESCARTA o veredito do PR: exit 4, routing.human=true,
 # fail_open_triggered=true. Nunca aprova, nunca reprova o PR — chama humano.
 #
-# Bandas medidas em 2026-09-18 contra typesafe/jev-1.13 no OpenRouter real, pergunta
-# `atende`, 6 repetições por estado: negativo 0.04 0.05 0.04 0.04 0.04 0.04 (máximo 0.05,
-# jitter 0.01); positivo 0.94 seis vezes (jitter ZERO). ~1.2s e US$ 0.0000143 por
-# requisição — as 12 repetições custaram US$ 0.00017. Jitter medido de 0.01 significa que
-# banda com margem menor que ~0.02 é flaky por construção; não copie banda apertada.
+# CALIBRAÇÃO: a banda é medida contra o PRÓPRIO texto do `state` que está logo abaixo
+# dela, nunca contra um texto parecido. Receita reproduzível, números e o incidente que
+# criou esta regra: docs/calibracao-do-controle.md. Regra curta: 8 repetições do payload
+# REAL (model + state + TODAS as questions deste arquivo), banda = pior caso medido com
+# margem de 0.10.
+#
+# Medido em 2026-09-18 contra typesafe/jev-1.13 no endpoint real, pergunta `atende`,
+# 8 repetições por estado, payload idêntico ao que a Action manda:
+#   negativo  0.02 ×8                                 -> min 0.02 max 0.02 jitter 0.00
+#   positivo  0.93 0.92 0.93 0.93 0.93 0.92 0.92 0.93 -> min 0.92 max 0.93 jitter 0.01
+# US$ 0.0000278 (negativo) a 0.0000309 (positivo) por requisição, com as 5 perguntas
+# juntas; as 16 repetições desta leitura custaram US$ 0.00047. Jitter medido nesta
+# família: 0.00 a 0.03 — margem menor que ~0.05 é flaky por construção, e é por isso
+# que a margem exigida é 0.10.
 control:
   - name: pr_vazio_nao_atende
     # `state` é texto FIXO no arquivo, nunca derivado do PR em julgamento: é justamente
     # por ser conhecido que ele mede o juiz.
     state: "PR: 'docs: corrige typo no README'. Diffstat: 1 1 README.md. A issue que este PR fecha pede: implementar o endpoint POST /aceite e cobri-lo com teste."
     expect:
-      # NEGATIVO: visto 0.05 contra a banda 0.89 = margem medida de 0.84.
-      atende: { max: 0.89 }
+      # NEGATIVO: medido 0.02 ×8 em 2026-09-18 (pior caso já registrado neste texto:
+      # 0.05, na leitura de 6 repetições do mesmo dia) -> banda 0.15, margem de 0.10
+      # sobre esse pior caso e de 0.13 sobre o medido hoje.
+      #
+      # Apertada de 0.89 para 0.15 com razão medida: 0.89 fica ACIMA de
+      # routing.human_below=0.7, então um juiz derivado que respondesse 0.85 para um PR
+      # de typo no README passava no controle E aprovava sozinho o PR real — exatamente
+      # o juiz "diz SIM pra tudo" que este caso existe para pegar. A banda precisa
+      # tropeçar ANTES da zona em que o juiz consegue emitir veredito: 0.15 tropeça,
+      # 0.89 não. Controle negativo trocado por humano custa uma revisão; controle
+      # negativo cego custa um merge errado.
+      atende: { max: 0.15 }
   - name: pr_exemplar_atende
-    state: "PR: 'feat: endpoint POST /aceite + teste'. Diffstat: 64 0 src/aceite.py / 41 0 tests/test_aceite.py. A issue que este PR fecha pede exatamente: implementar o endpoint POST /aceite e cobri-lo com teste. Suite verde."
+    # Texto REESCRITO em 2026-09-18. O anterior media 0.78 ×8 contra a banda min 0.89 e
+    # reprovava sozinho — foi ele que descartou um veredito legítimo na run 35387669508.
+    # O 0.94 que justificava aquela banda tinha sido medido em OUTRO texto. E a hesitação
+    # tinha motivo nomeável: a pergunta `atende` cita a intenção do épico raiz e o state
+    # não trazia épico nenhum, então 0.78 era o juiz certo respondendo a um texto
+    # incompleto. Este texto fecha a lacuna (épico, issue, e o que NÃO entrou).
+    state: "PR: 'feat: endpoint POST /aceite + teste'. Diffstat: 64 0 src/aceite.py / 41 0 tests/test_aceite.py. A issue que este PR fecha pede, literalmente: implementar o endpoint POST /aceite e cobri-lo com teste. O épico raiz pede: expor a API de aceite, um endpoint por issue, cada um com teste. Este PR faz exatamente isso e nada além: nenhum item da issue ficou de fora, nenhum trabalho de outra issue entrou. Suite verde."
     expect:
-      # POSITIVO, e é o lado APERTADO da assimetria: margem medida de 0.05 (0.94 visto
-      # contra 0.89), contra 0.84 do negativo. É este que derrapa primeiro se o modelo
-      # andar — quando `pr_exemplar_atende` começar a reprovar, foi o juiz que mudou, não
-      # o contrato. A banda dos dois lados não reprova sozinha: com 0.84 e 0.05 de folga,
-      # controle espúrio que jogaria todo PR pro humano está descartado por medição.
-      atende: { min: 0.89 }
+      # POSITIVO: medido 0.92-0.93 (8 repetições) em 2026-09-18 -> banda 0.82, margem de
+      # 0.10 sobre o pior caso medido, 10x o jitter de 0.01 deste texto.
+      #
+      # 0.82 fica ACIMA de routing.human_below=0.7 de propósito. A alternativa era manter
+      # o texto de 0.78 e baixar a banda para 0.66, e isso mataria o controle: banda
+      # positiva abaixo do limiar humano é satisfeita por valores que já são "não
+      # atende", ou seja, um juiz degradado respondendo 0.68 para tudo passaria no
+      # controle enquanto mandava todo PR para revisão humana. Por isso o caminho foi
+      # reescrever o texto, não afrouxar a banda.
+      atende: { min: 0.82 }
 
 # 403 de cota, 429, 5xx, timeout e erro de ferramenta NUNCA reprovam o PR.
 fail_open: true
