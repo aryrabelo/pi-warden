@@ -66,6 +66,16 @@ runs:
         OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
+        # `set +e` NAO e' redundante, e' o conserto. `shell: bash` numa composite
+        # roda `bash --noprofile --norc -eo pipefail {0}`: o `-e` vem INJETADO pelo
+        # GitHub e `set -uo pipefail` nao o desliga. Com `-e` + `pipefail`, o
+        # pipeline `jev-accept.sh | tee` saindo 3 (humano) ou 4 (fail-open) mata o
+        # shell NA HORA: a linha `rc="${PIPESTATUS[0]}"` nunca roda e nenhum output
+        # e' escrito. Medido na run 35391862769 (aryrabelo/pi-warden): o juiz
+        # respondeu (atende 0.34), o script saiu 3, e o step morreu com
+        # "Process completed with exit code 3" sem escrever o GITHUB_OUTPUT.
+        # Probe local com `bash arquivo.sh` NAO reproduz - ali nao ha `-e`.
+        set +e
         set -uo pipefail
         out="$(mktemp)"
         # Este passo termina SEMPRE com status 0, e o resultado viaja nos `outputs:`.
